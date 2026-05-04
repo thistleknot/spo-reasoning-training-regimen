@@ -1,308 +1,179 @@
 # SPO Reasoning Training Regimen
 
-**Complete pipeline for generating synthetic reasoning datasets and training models with Soft Policy Optimization.**
+Build quote -> structured reasoning dataset -> QLoRA adapter -> confidence-calibrated reasoning model.
 
-## What This Does (5-Minute Overview)
+This repo packages the full workflow for turning raw quotes into structured reasoning examples, training a model to emit that reasoning in a pedagogical order, and optionally calibrating confidence with Soft Policy Optimization (SPO). The root README is the front door; the deeper mechanics live in the docs folders linked below.
 
-Three-phase workflow to build reasoning models:
+## What you get
 
+- Synthetic reasoning dataset generation from quotes
+- A format contract that separates generation order from training order
+- QLoRA training guidance for small-to-mid-size reasoning models
+- Optional SPO calibration where `reward = correctness x confidence`
+- "Seeing is believing" example artifacts under `data/`
+
+## Workflow at a glance
+
+```mermaid
+flowchart LR
+    A[Quotes] --> B[Generation<br/>LLM or templates]
+    B --> C[Validated reasoning examples]
+    C --> D[Training JSONL<br/>pedagogical order]
+    D --> E[QLoRA adapter]
+    E --> F[Inference on new quotes]
+    F --> G[SPO calibration<br/>optional]
 ```
-Phase 1: GENERATE              Phase 2: TRAIN                Phase 3: OPTIMIZE
-─────────────────────────      ────────────────────────      ──────────────────
-Quotes (text)                  Generated JSONL                Trained Model
-    ↓                                ↓                            ↓
-LLM extracts reasoning         QLoRA fine-tuning         SPO confidence optimization
-(triplets + syllogism)         (pedagogical format)       (reward = correctness × confidence)
-    ↓                                ↓                            ↓
-ReasoningExamples              Tuned Adapter              Calibrated Model
-    ↓                                ↓                            ↓
-Training JSONL            Production-ready           Ready for deployment
-```
 
-## Quick Start (2 Minutes)
+## Fast paths
+
+| If you want to... | Start here |
+|---|---|
+| Understand the whole workflow fast | `docs/quickstart/README.md` |
+| Configure an LLM for dataset generation | `docs/generation/README.md` |
+| Train with QLoRA | `docs/training/README.md` |
+| Configure model inference | `docs/inference/README.md` |
+| Understand the exact format contract | `docs/format/README.md` |
+| See finished examples before touching code | `data/SEEING_IS_BELIEVING_EXAMPLES.md` |
+
+## Quick start
 
 ### Install
+
 ```bash
 git clone https://github.com/thistleknot/spo-reasoning-training-regimen.git
 cd spo-reasoning-training-regimen
 pip install -r requirements.txt
 ```
 
-### Generate Examples
+### Generate a starter dataset
+
 ```python
 from src.synthetic_generator import SyntheticReasoningGenerator
 
-# Without LLM (create templates)
+quotes = [
+    "By the pricking of my thumbs, Something wicked this way comes.",
+    "Call me Ishmael.",
+]
+
 gen = SyntheticReasoningGenerator()
-quotes = ["Your quote here", "Another quote"]
 examples = gen.generate_from_quotes(quotes)
-gen.export_to_jsonl("data/examples.jsonl")
+gen.export_to_jsonl("data/my_dataset.jsonl")
 ```
 
-### With LLM (OpenAI)
-```python
-from openai import OpenAI
-client = OpenAI(api_key="your-key")
+That path creates template-backed examples immediately. If you want model-backed generation with OpenAI, Ollama, or Hugging Face, go straight to `docs/generation/README.md`.
 
-def generate_fn(prompt):
-    return client.chat.completions.create(
-        model="gpt-4",
-        messages=[{"role": "user", "content": prompt}],
-    ).choices[0].message.content
+### Then choose your next step
 
-examples = gen.generate_from_quotes(quotes, llm_generate_fn=generate_fn)
-```
+1. Inspect example outputs in `data/SEEING_IS_BELIEVING_EXAMPLES.md`
+2. Learn the format contract in `docs/format/README.md`
+3. Train a model via `docs/training/README.md`
+4. Configure inference via `docs/inference/README.md`
+5. Add SPO calibration if you want confidence to mean something downstream
 
-### Train with QLoRA
-```python
-# Use the generated data/examples.jsonl with your QLoRA trainer
-# See docs/training/ for complete setup
-```
+## Why the format matters
 
-## Three Phases Explained
+The core design choice is that the repo uses different orders for different stages of the pipeline.
 
-### Phase 1: Synthetic Dataset Generation (`docs/generation/README.md`)
+| Stage | Order | Why |
+|---|---|---|
+| Generation | Throughline -> Entailed -> Non-Entailed | Natural reasoning flow for the generating LLM |
+| Training | Non-Entailed -> Entailed -> Throughline | Negative inference first; better contrastive signal |
+| Inference | Non-Entailed -> Entailed -> Throughline | The model tends to emit what it was taught |
 
-Transform raw quotes into structured reasoning:
+This matters because the training target is not just "state the answer." It teaches the model what does **not** support the conclusion before teaching what does. That is the job of **Candidate NOT_ENTAILED** premises.
 
-```
-"By the pricking of my thumbs, Something wicked this way comes."
-    ↓
-[Model extracts reasoning]
-    ↓
-Non-Entailed Premises:
-  thumbs | are (observed) | pricking
+For the full specification, examples, and exact `Input` / `Completion` layout, read `docs/format/README.md`.
 
-Entailed Premises:
-  something | is (inferred, confidence=0.85) | wicked
-  
-Throughline:
-  Physical sensations signal approaching danger
-```
+## Model configuration: where it lives
 
-**You can use:**
-- OpenAI GPT-4
-- Local Qwen models
-- Anthropic Claude
-- HuggingFace models
-- Or no LLM (manual templates)
+One of the prior pain points was making generation-model and inference-model setup too easy to miss. The split is now:
 
-See **`docs/generation/README.md`** for model configuration and examples.
+| Need | Where to go |
+|---|---|
+| Configure an LLM to generate synthetic data | `docs/generation/README.md` |
+| Load a fine-tuned adapter or set inference parameters | `docs/inference/README.md` |
+| Configure QLoRA training knobs | `docs/training/README.md` |
+| Understand why confidence is emergent instead of trained as a label | `docs/architecture/README.md` |
 
-### Phase 2: QLoRA Training (`docs/training/README.md`)
+## Repo map
 
-Fine-tune a language model on the generated reasoning data:
-
-```python
-# Takes: Generated JSONL + base model (Qwen, Llama, etc.)
-# Returns: QLoRA adapter (~10MB) with learned reasoning patterns
-# Time: 30 min - 2 hours depending on model size
-```
-
-**Features:**
-- 4-bit quantization (fits in 8GB VRAM)
-- Configurable rank, learning rate, epochs
-- Multi-GPU support
-- Monitoring with WandB/TensorBoard
-
-See **`docs/training/README.md`** for full QLoRA setup.
-
-### Phase 3: SPO Confidence Optimization (Optional)
-
-Optimize the model's confidence calibration using downstream task rewards:
-
-```python
-# Training: Model learns to generate triplets
-# SPO: Model learns accurate confidence scores
-# Reward: correctness × confidence (only high-confidence correct outputs rewarded)
-```
-
-This ensures your model is **confident when right, uncertain when wrong**.
-
-See `src/spo_trainer.py` for implementation.
-
-## Key Insight: Architecture
-
-### Confidence is NOT a Training Label
-
-```
-Training Phase:
-  Model learns: Generate correct triplets
-  Data contains: Evidence tags (observed/inferred) - NO confidence
-  
-Inference Phase:
-  Model generates: Triplets WITH confidence (emergent)
-  Example: confidence=0.8 on "something | is | wicked"
-  
-SPO Phase:
-  Model learns: Assign accurate confidence
-  Reward signal: Downstream task correctness
-  Result: confidence ≈ actual accuracy
-```
-
-**Why this matters:**
-- Separates structure learning from calibration
-- Prevents confidence overfitting to training labels
-- Enables better transfer to new tasks
-- Model is interpretable (confidence has meaning)
-
-## Data Format: Pedagogical Order
-
-Training data uses: **Non-Entailed → Entailed → Throughline**
-
-Why this order?
-1. **Negative inference first** — Model learns what's irrelevant
-2. **Contrastive learning** — Discriminate true from false facts
-3. **Better convergence** — Explicit negatives improve training
-
-Example:
-```json
-{
-  "input_text": "\"By the pricking of my thumbs...\"",
-  "output_text": "Non-Entailed Premises:\n  thumbs | are (observed, confidence=1.0) | pricking\n\nEntailed Premises:\n  something | is (inferred, confidence=0.85) | wicked\n\nThroughline:\n  When one feels a premonition, something bad approaches."
-}
-```
-
-## Project Structure
-
-```
+```text
 spo-reasoning-training-regimen/
 ├── src/
-│   ├── synthetic_generator.py    # Quote → ReasoningExample
-│   ├── spo_trainer.py            # SPO confidence optimization
-│   ├── pipeline.py               # End-to-end orchestration
-│   ├── training_config.py        # Format configuration
-│   ├── graph_ontology.py         # Triplet storage & retrieval
-│   └── [4 more modules]
-│
+│   ├── synthetic_generator.py
+│   ├── spo_trainer.py
+│   ├── pipeline.py
+│   ├── training_config.py
+│   ├── graph_ontology.py
+│   └── ...
 ├── docs/
-│   ├── generation/README.md      # Phase 1: Dataset generation & LLM config
-│   ├── training/README.md        # Phase 2: QLoRA training setup
-│   ├── inference/README.md       # Model inference configuration
-│   ├── format/README.md          # Format specification
-│   ├── architecture/README.md    # Design principles
-│   └── quickstart/README.md      # Quick reference
-│
-├── data/
-│   ├── sample_quotes.txt         # Example input quotes
-│   ├── examples_training_format.jsonl  # 5 complete end-to-end examples
-│   ├── SEEING_IS_BELIEVING_EXAMPLES.md # Example outputs with explanations
-│   └── train_clean_for_model_967.jsonl # 967 production training records
-│
-├── README.md                     # This file (overview)
-└── requirements.txt              # Dependencies
+│   ├── generation/README.md
+│   ├── training/README.md
+│   ├── inference/README.md
+│   ├── format/README.md
+│   ├── architecture/README.md
+│   └── quickstart/README.md
+└── data/
+    ├── sample_quotes.txt
+    ├── examples_training_format.jsonl
+    ├── SEEING_IS_BELIEVING_EXAMPLES.md
+    └── train_clean_for_model_967.jsonl
 ```
 
-## Documentation Guide
+## Seeing-is-believing artifacts
+
+If you want to inspect the output shape before generating anything, start here:
+
+| Artifact | Why it matters |
+|---|---|
+| `data/SEEING_IS_BELIEVING_EXAMPLES.md` | Human-readable examples of quote -> structured reasoning |
+| `data/examples_training_format.jsonl` | The same examples in training-ready JSONL |
+| `data/sample_quotes.txt` | Easy starter input set |
+| `data/train_clean_for_model_967.jsonl` | Larger cleaned training corpus used in prior work |
+
+## Documentation guide
 
 | Goal | Read |
-|------|------|
+|---|---|
 | Generate datasets from quotes | `docs/generation/README.md` |
+| Get running quickly | `docs/quickstart/README.md` |
 | Configure models for inference | `docs/inference/README.md` |
 | Train with QLoRA | `docs/training/README.md` |
-| Understand data format | `docs/format/README.md` |
-| See example outputs | `data/SEEING_IS_BELIEVING_EXAMPLES.md` |
-| Understand architecture | `docs/architecture/README.md` |
-| Quick reference | `docs/quickstart/README.md` |
+| Understand data format and ordering | `docs/format/README.md` |
+| Understand architecture and rationale | `docs/architecture/README.md` |
+| Inspect example data and artifacts | `data/README.md` |
 
-## Complete Example Workflow
+## The three phases in one paragraph each
 
-```python
-# 1. GENERATE: Create examples from quotes
-from src.synthetic_generator import SyntheticReasoningGenerator
-from openai import OpenAI
+### Phase 1: Generate
 
-# Configure LLM
-client = OpenAI(api_key="your-key")
-def generate_fn(prompt):
-    return client.chat.completions.create(
-        model="gpt-4",
-        messages=[{"role": "user", "content": prompt}],
-    ).choices[0].message.content
+Turn raw quotes into structured reasoning examples. This can be done with a hosted LLM, a local model, or plain templates if you want to hand-fill the outputs.
 
-# Generate
-gen = SyntheticReasoningGenerator()
-quotes = ["Your quote 1", "Your quote 2"]
-examples = gen.generate_from_quotes(quotes, llm_generate_fn=generate_fn)
-gen.export_to_jsonl("data/my_dataset.jsonl")
+### Phase 2: Train
 
-# 2. TRAIN: Fine-tune with QLoRA (see docs/training/README.md)
-# This takes generated JSONL and produces a trained adapter
+Take the validated JSONL and fine-tune a base model so it learns the pedagogical reasoning format: non-entailed premises first, then entailed premises, then the throughline.
 
-# 3. OPTIMIZE: Apply SPO (optional, for confidence calibration)
-from src.spo_trainer import SPOTrainer, SPOEvaluator
-trainer = SPOTrainer(model, tokenizer, SPOEvaluator.composite_score)
-# ... SPO training loop ...
+### Phase 3: Optimize
 
-# 4. DEPLOY: Use trained model for inference
-# Load adapter + use for new reasoning tasks
-```
+Apply SPO if you want the model's confidence scores to be calibrated rather than decorative. The objective is simple: reward correct answers more when the model is confidently right, and do not reward confident wrong answers.
 
-## What You Get
+## Hardware by phase
 
-✅ **End-to-end pipeline** — Quotes to reasoning model in ~2 hours
-✅ **Multiple model options** — OpenAI, Qwen, Llama, Anthropic, HF
-✅ **Pedagogical training format** — Improves convergence and interpretability
-✅ **SPO support** — Optimize confidence calibration
-✅ **Graph ontology** — Enables fact retrieval and multi-hop reasoning
-✅ **5 example outputs** — See exactly what the pipeline produces
+| Phase | GPU | VRAM | Notes |
+|---|---|---|---|
+| Generation | Optional | Depends on model | Hosted APIs or local models both work |
+| Training | Recommended | 8GB+ | QLoRA keeps smaller models practical |
+| SPO | Recommended | 8GB+ | Useful when confidence calibration matters |
 
-## Hardware Requirements
+## Practical next steps
 
-| Phase | GPU | VRAM | Time |
-|-------|-----|------|------|
-| Generation | Optional | Varies | Minutes-hours (depends on LLM) |
-| Training | Recommended | 8GB+ | 30 min - 2 hours |
-| SPO | Recommended | 8GB+ | 1-4 hours |
-
-**Note:** Training uses 4-bit quantization so Qwen 0.6B fits in 8GB VRAM.
-
-## Common Patterns
-
-### Template-Based (No LLM)
-```python
-gen = SyntheticReasoningGenerator()
-examples = gen.generate_from_quotes(quotes)  # Creates empty templates
-gen.export_to_json("data/templates.json")
-# Then manually fill in each example
-```
-
-### Batch Generation (Process Large Datasets)
-```python
-for i in range(0, len(all_quotes), batch_size):
-    batch = all_quotes[i:i+batch_size]
-    examples = gen.generate_from_quotes(batch, llm_generate_fn=generate_fn)
-    gen.export_to_jsonl(f"data/batch_{i}.jsonl")
-```
-
-### With Config System (Parametrize Everything)
-```python
-from src.training_config import PipelineConfig, TrainingFormat, PremiseOrdering
-config = PipelineConfig(
-    training_format=TrainingFormat(
-        premise_ordering=PremiseOrdering.PEDAGOGICAL,
-    )
-)
-# Use config throughout pipeline
-```
-
-## See Also
-
-- **`docs/generation/README.md`** — How to configure models for generation
-- **`docs/training/README.md`** — How to set up QLoRA training
-- **`docs/inference/README.md`** — Model configuration details
-- **`data/SEEING_IS_BELIEVING_EXAMPLES.md`** — Example outputs
-- **`src/synthetic_generator.py`** — Implementation details
-
-## Next Steps
-
-1. **Try the examples** — Load `data/examples_training_format.jsonl` and inspect
-2. **Generate your own** — Follow `docs/generation/README.md`
-3. **Train a model** — Follow `docs/training/README.md`
-4. **Optimize confidence** — Use SPO trainer for calibration
-5. **Deploy** — Use trained model for reasoning tasks
+1. Read `data/SEEING_IS_BELIEVING_EXAMPLES.md` if you want output intuition first
+2. Use `docs/generation/README.md` if you need help wiring up OpenAI, Ollama, or Hugging Face
+3. Use `docs/format/README.md` if you need the exact prompt and serialization contract
+4. Use `docs/training/README.md` when you are ready to fine-tune
+5. Use `docs/inference/README.md` when you are ready to load adapters and run new quotes
 
 ---
 
-**Status:** Production-ready ✅
+**Status:** Production-ready  
 **Repository:** https://github.com/thistleknot/spo-reasoning-training-regimen

@@ -14,8 +14,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Callable
 from dataclasses import dataclass, asdict
 
-from synthetic_generator import SyntheticReasoningGenerator, ReasoningExample
-from spo_trainer import SPOTrainer, SPOEvaluator
+from .synthetic_generator import SyntheticReasoningGenerator, ReasoningExample
+from .spo_trainer import SPOTrainer, SPOEvaluator
 
 
 logger = logging.getLogger(__name__)

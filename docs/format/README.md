@@ -5,141 +5,186 @@ Complete specification for the SPO reasoning training format.
 ## Overview
 
 The training format encodes semantic reasoning as structured triplets (subject-relation-object) with evidence tags and confidence scores. This enables:
-- **Negative inference training** (what's NOT entailed improves discrimination)
-- **Syllogistic reasoning** (how premises lead to conclusions)
+- **Candidate NOT_ENTAILED (for negative inference)** — Premises that don't support the conclusion
+- **Entailed Premises** — Premises that logically support the conclusion
+- **Throughline** — The abductive hypothesis connecting premises to conclusion
 - **Confidence calibration** (via SPO optimization)
-- **Graph storage** (triplets are naturally graph-compatible)
 
-## Format Versions
+## Data Flow: Generation vs Training vs Inference
 
-### Pedagogical Order (RECOMMENDED for training)
-
-**Purpose:** Teaches the model what's relevant (contrastive learning)
-
-```
-[NON-ENTAILED]
-subject | relation (evidence_tag, confidence=X) | object
-subject | relation (evidence_tag, confidence=Y) | object
-...
-
-[ENTAILED]
-subject | relation (evidence_tag, confidence=X) | object
-subject | relation (evidence_tag, confidence=Y) | object
-...
-
-[CONCLUSION]
-The syllogistic conclusion that maximizes entailed premises.
+```mermaid
+graph TB
+    A["User Quote"] --> B["Generation"]
+    B -->|"LLM asks for<br/>Throughline → Entailed → Non-Entailed"| C["Generation Order<br/>Logical reasoning flow"]
+    C --> D["Pydantic Validation"]
+    D --> E["Transform to<br/>Pedagogical Order"]
+    E -->|"Non-Entailed → Entailed → Throughline<br/>Negative examples first"| F["Training Data"]
+    F --> G["QLoRA Training"]
+    G --> H["Trained Model"]
+    H --> I["Inference on Quote"]
+    I -->|"Output in Pedagogical Order<br/>inherited from training"| J["Non-Entailed → Entailed → Throughline"]
+    J --> K["Extract Confidence<br/>confidence=X.XX"]
+    K --> L["SPO Optimization<br/>Reward = correctness × confidence"]
 ```
 
-**Example:**
+## Three Stages: Generation vs Training vs Inference
+
+### Stage 1: GENERATION (What we ask the LLM)
+
+**Prompt Structure:**
 ```
-[NON-ENTAILED]
-thumbs | are (observed, confidence=1.0) | sore
-premonition | comes (inferred, confidence=0.4) | from fate alone
+Input:
+"{quote}"
 
-[ENTAILED]
-something | is (inferred, confidence=0.85) | wicked
-approaching | indicates (inferred, confidence=0.9) | danger
-premonition | signals (observed, confidence=1.0) | something wicked
-
-[CONCLUSION]
-When one feels a premonition through physical sensation, something wicked or dangerous approaches.
+Completion: (Ask for as Pydantic keys and lists and/or N/A, in this order)
 ```
-
-**Why this order?**
-- Non-entailed premises first teaches negative inference (what to exclude)
-- Entailed premises teach supporting evidence (what to include)
-- Better convergence than random order
-- More interpretable outputs
-
-### Logical Order (For inference output)
-
-**Purpose:** Output in logical sequence (throughline → supporting → rejected)
-
+{completion}
 ```
-[THROUGHLINE]
-The core abductive hypothesis...
-
-[ENTAILED]
-subject | relation (evidence_tag, confidence=X) | object
-...
-
-[NON-ENTAILED]
-subject | relation (evidence_tag, confidence=Y) | object
-...
 ```
 
-### Entailed Only (LEGACY)
-
+**Generation Order (Logical Flow):**
 ```
-[ENTAILED]
-subject | relation (evidence_tag, confidence=X) | object
-...
+Throughline:
+  When one feels a premonition or intuitive sense, something bad is approaching.
 
-[CONCLUSION]
-The hypothesis.
+Entailed Premises:
+  - something | is (inferred, confidence=0.75) | wicked
+  - something | is (inferred, confidence=0.8) | coming
+
+Non Entailed Premises:
+  - thumbs | are (observed, confidence=1.0) | pricking
 ```
 
-## Evidence Tags
+**Why This Order for Generation?**
+- **Throughline first**: LLM generates the hypothesis naturally
+- **Entailed next**: LLM lists supporting evidence
+- **Non-entailed last**: LLM identifies rejected candidates (negative inference)
+- Matches human reasoning: conclusion → supporting evidence → what doesn't fit
 
-Each triplet includes an evidence tag:
+**Example Full Generation:**
+```
+Input:
+"By the pricking of my thumbs, Something wicked this way comes."
 
-- **observed** (confidence = 1.0)
-  - Explicit in the source text
-  - Example: `thumbs | are (observed, confidence=1.0) | pricking`
+Completion:
+```
+Throughline:
+  When one feels a premonition or intuitive sense, something bad is approaching.
 
-- **inferred** (confidence ∈ [0.3, 0.9])
-  - Derived from context, not explicit
-  - Example: `something | is (inferred, confidence=0.85) | wicked`
+Entailed Premises:
+  - something | is (inferred, confidence=0.75) | wicked
+  - something | is (inferred, confidence=0.8) | coming
+  - premonition | signals (observed, confidence=1.0) | danger
 
-**Confidence Score Semantics:**
-- 1.0 = Certain (observed in text)
-- 0.9 = Very likely (strong inference)
-- 0.7-0.8 = Probable (reasonable inference)
-- 0.5-0.6 = Weak (speculative but plausible)
-- 0.3-0.4 = Unlikely (included as negative example)
+Non Entailed Premises:
+  - thumbs | are (observed, confidence=1.0) | pricking
+  - sensation | causes (inferred, confidence=0.4) | physical pain
+```
+```
+
+### Stage 2: TRAINING (What model learns)
+
+**Transformation:** Reorder to **Pedagogical** order for better convergence
+
+**Pedagogical Format** (Negative Examples First):
+```
+Non Entailed Premises:
+  - thumbs | are (observed, confidence=1.0) | pricking
+  - sensation | causes (inferred, confidence=0.4) | physical pain
+
+Entailed Premises:
+  - something | is (inferred, confidence=0.75) | wicked
+  - something | is (inferred, confidence=0.8) | coming
+  - premonition | signals (observed, confidence=1.0) | danger
+
+Throughline:
+  When one feels a premonition or intuitive sense, something bad is approaching.
+```
+
+**Training Record (JSONL):**
+```json
+{
+  "input_text": "By the pricking of my thumbs, Something wicked this way comes.",
+  "output_text": "Non Entailed Premises:\n  - thumbs | are (observed, confidence=1.0) | pricking\n  - sensation | causes (inferred, confidence=0.4) | physical pain\n\nEntailed Premises:\n  - something | is (inferred, confidence=0.75) | wicked\n  - something | is (inferred, confidence=0.8) | coming\n  - premonition | signals (observed, confidence=1.0) | danger\n\nThroughline:\n  When one feels a premonition or intuitive sense, something bad is approaching."
+}
+```
+
+**Why Pedagogical Order for Training?**
+- **Non-Entailed First** (Negative Examples) — Teaches discrimination (what to exclude)
+- **Entailed Second** (Positive Examples) — Teaches support (what to include)
+- **Throughline Last** (Conclusion) — Reinforces the reasoning pattern
+- Better convergence than other orders
+- Model learns: "First exclude irrelevant premises, then include relevant ones, then conclude"
+
+### Stage 3: INFERENCE (What trained model produces)
+
+**Given a new quote, model generates:**
+```
+Input:
+"Call me Ishmael. I am a sailor."
+
+Completion: (model outputs in learned pedagogical order)
+```
+Non Entailed Premises:
+  - Ishmael | is (inferred, confidence=0.3) | fictional character
+  - sailor | is (inferred, confidence=0.4) | wealthy
+
+Entailed Premises:
+  - person | is (observed, confidence=1.0) | narrator
+  - narrator | has (inferred, confidence=0.85) | maritime experience
+  - maritime experience | implies (inferred, confidence=0.8) | sea knowledge
+
+Throughline:
+  The narrator is establishing their identity as someone with extensive maritime knowledge and seafaring experience.
+```
+```
+
+**Key Point:** Model outputs in pedagogical order (learned during training) — **NOT** generation order
+
+**Confidence Extraction:**
+- Regex pattern: `confidence=([0-9.]+)`
+- Extract all confidence scores
+- Used for SPO reward calculation: `reward = correctness × average_confidence`
 
 ## Triplet Structure
 
+### Format
 ```
 subject | relation (evidence_tag, confidence=X.XX) | object
 ```
 
-### Subject & Object
-- Any nominal entity: person, place, thing, property, event
-- Normalized for synset collapse (entity linking)
-- Example: "something", "premonition", "danger", "thumbs"
+### Components
 
-### Relation
+**Subject & Object**
+- Any nominal entity: person, place, thing, property, event
+- Example: "something", "premonition", "danger", "thumbs", "sailor"
+
+**Relation**
 - Predicate connecting subject to object
 - Typically verb or verb phrase
-- Example: "is", "causes", "indicates", "pricking"
+- Example: "is", "causes", "signals", "implies", "has"
 
-### Tags
-- **evidence_tag** = "observed" or "inferred"
-- **confidence** = Float from 0.0 to 1.0
+**Evidence Tag**
+- **observed** (confidence = 1.0)
+  - Explicit in the source text
+  - Example: `thumbs | are (observed, confidence=1.0) | pricking`
+  
+- **inferred** (confidence ∈ [0.3, 0.9])
+  - Derived from context, not explicit
+  - Example: `something | is (inferred, confidence=0.85) | wicked`
 
-## Full Example: Training Record
+**Confidence Score**
+- 1.0 = Certain (observed in text)
+- 0.9 = Very likely (strong inference)
+- 0.7-0.8 = Probable (reasonable inference)
+- 0.5-0.6 = Weak (speculative)
+- 0.3-0.4 = Unlikely (negative example for training)
 
-```json
-{
-  "input_text": "By the pricking of my thumbs, Something wicked this way comes.",
-  "output_text": "[NON-ENTAILED]\nthumbsare (observed, confidence=1.0) | sore\npremonition | comes (inferred, confidence=0.3) | from fate\n\n[ENTAILED]\nsomething | is (inferred, confidence=0.85) | wicked\napproaching | signals (inferred, confidence=0.9) | danger\npremonition | indicates (observed, confidence=1.0) | something wicked\n\n[CONCLUSION]\nWhen one feels a premonition through physical sensation, something wicked or dangerous approaches."
-}
-```
+## Pydantic Schema
 
-## Serialization
-
-### JSONL Format (for training)
-```
-{"input_text": "quote", "output_text": "[NON-ENTAILED]..."}
-{"input_text": "quote2", "output_text": "[NON-ENTAILED]..."}
-```
-
-### Python Objects
 ```python
 from pydantic import BaseModel
-from typing import List, Set
+from typing import List
 
 class TripletItem(BaseModel):
     subject: str
@@ -150,60 +195,187 @@ class TripletItem(BaseModel):
 
 class ReasoningExample(BaseModel):
     quote: str
-    non_entailed_premises: Set[TripletItem]
-    entailed_premises: Set[TripletItem]
-    syllogism: str
+    throughline: str
+    entailed_premises: List[TripletItem]
+    non_entailed_premises: List[TripletItem]
 ```
 
-## Configuration Options
-
-The pipeline supports three format variants via `TrainingFormat` enum:
-
+### Generation Order (What LLM produces)
 ```python
-class TrainingFormat(Enum):
-    PEDAGOGICAL = "pedagogical"      # Non-Entailed → Entailed → Conclusion
-    LOGICAL = "logical"              # Conclusion → Entailed → Non-Entailed
-    ENTAILED_ONLY = "entailed_only"  # Entailed only (no negatives)
+# LLM returns triplets in this order for comprehension
+{
+    "quote": str,
+    "throughline": str,
+    "entailed_premises": List[TripletItem],      # Evidence supporting conclusion
+    "non_entailed_premises": List[TripletItem]   # Candidates for negative inference
+}
 ```
 
-**Selection guidance:**
-- **PEDAGOGICAL** (default): Best for training convergence
-- **LOGICAL**: Better matches human reading order
-- **ENTAILED_ONLY**: Faster training, slightly lower quality
+### Training Order (Transformed for learning)
+```python
+# Transform to pedagogical for training (negative examples first)
+{
+    "quote": str,
+    "non_entailed_premises": List[TripletItem],  # Teach negatives FIRST
+    "entailed_premises": List[TripletItem],      # Then positives
+    "throughline": str                            # Finally conclusion
+}
+```
+
+### Inference Order (What model learns to produce)
+```python
+# Model outputs in pedagogical order (inherited from training)
+{
+    "quote": str,
+    "non_entailed_premises": List[TripletItem],  # Negative examples
+    "entailed_premises": List[TripletItem],      # Supporting evidence
+    "throughline": str                            # Conclusion
+}
+```
+
+## Format Variants
+
+### Generation Format (Logical Order)
+
+**Purpose:** Natural reasoning flow when asking LLM to think
+
+```
+Throughline:
+  The hypothesis...
+
+Entailed Premises:
+  - subject | relation (tag, conf=X) | object
+  - subject | relation (tag, conf=Y) | object
+
+Non Entailed Premises:
+  - subject | relation (tag, conf=Z) | object
+  - subject | relation (tag, conf=W) | object
+```
+
+**When to use:** LLM prompt for generating reasoning
+
+### Training Format (Pedagogical Order)
+
+**Purpose:** Optimized for model learning via contrastive examples
+
+```
+Non Entailed Premises:
+  - subject | relation (tag, conf=Z) | object
+  - subject | relation (tag, conf=W) | object
+
+Entailed Premises:
+  - subject | relation (tag, conf=X) | object
+  - subject | relation (tag, conf=Y) | object
+
+Throughline:
+  The hypothesis...
+```
+
+**When to use:** Training data (QLoRA fine-tuning)
+
+### Inference Format (Trained Habit)
+
+**Purpose:** Model outputs in learned pedagogical order
+
+```
+Non Entailed Premises:
+  - subject | relation (tag, conf=Z) | object
+  - subject | relation (tag, conf=W) | object
+
+Entailed Premises:
+  - subject | relation (tag, conf=X) | object
+  - subject | relation (tag, conf=Y) | object
+
+Throughline:
+  The hypothesis...
+```
+
+**When to use:** Model inference outputs (after training — inherited order)
 
 ## Confidence NOT in Training Data
 
 **Critical Design Decision:**
-- Training data contains NO confidence scores
-- Confidence emerges during inference
-- SPO then optimizes confidence calibration
+- Training data specifies confidence scores for reference
+- But model DOES NOT learn these as targets
+- Confidence emerges naturally during inference
+- SPO then optimizes the emergent confidence
 
 **Why?**
 - Prevents confidence overfitting to training labels
 - Enables better transfer to new domains
-- Natural uncertainty estimation
+- Confidence represents true uncertainty, not memorized values
 
-## Deterministic Ordering
+## SPO Policy (Optimization Phase)
 
-To ensure reproducible training:
+After training, the model generates triplets with emergent confidence. SPO optimizes this confidence.
+
+### Reward Calculation
 
 ```python
-# Hard-code sort key before writing
-records.sort(key=lambda r: (
-    r.avg_char_pos,       # Position in original text
-    r.sentence_index,     # Sentence number
-    r.triplet_index       # Triplet order
-))
+def spo_reward(
+    prediction: str,  # Model output with triplets + confidence
+    reference: str,   # Gold-standard reasoning
+    correctness_score: float  # 0.0 to 1.0 (LLM judgment or metric)
+) -> float:
+    # Extract confidence from model output
+    pattern = r'confidence=([0-9.]+)'
+    scores = [float(m.group(1)) for m in re.finditer(pattern, prediction)]
+    avg_confidence = sum(scores) / len(scores) if scores else 0.0
+    
+    # Reward = correctness × confidence
+    reward = correctness_score * avg_confidence
+    
+    return reward
 ```
 
-Average character position computed on original pre-cleaning text:
-```python
-avg_char_pos = original.find(sentence) + len(sentence) / 2
+### Reward Semantics
+
 ```
+reward = correctness × confidence
+
+If correctness=1.0, confidence=0.9 → reward=0.9 (HIGH)
+If correctness=1.0, confidence=0.5 → reward=0.5 (MEDIUM)
+If correctness=0.0, confidence=0.9 → reward=0.0 (PENALIZED)
+If correctness=0.0, confidence=0.1 → reward=0.0 (PENALIZED)
+```
+
+**Goal:** Model learns to be confident when correct and uncertain when wrong
+
+### Training Loop
+
+```python
+from src.spo_trainer import SPOTrainer, SPOReward
+
+# Create reward model
+reward = SPOReward(
+    model=trained_model,
+    tokenizer=tokenizer,
+    correctness_threshold=0.7
+)
+
+# Create SPO trainer
+trainer = SPOTrainer(
+    model=trained_model,
+    reward_fn=reward,
+    learning_rate=1e-5,
+    num_epochs=3
+)
+
+# Optimize
+trainer.train(dataset)
+```
+
+### Correctness Scoring
+
+Correctness can be judged by:
+1. **LLM Judge** — Another model evaluates correctness
+2. **Structured Match** — Does output match reference structure?
+3. **Semantic Similarity** — BERTScore or cosine similarity
+4. **Manual Labels** — Ground truth from humans
 
 ## Validation
 
-All training records must pass:
+All training records must pass Pydantic validation:
 
 ```python
 from pydantic import ValidationError
@@ -211,29 +383,45 @@ from pydantic import ValidationError
 try:
     example = ReasoningExample(
         quote=quote_text,
-        non_entailed_premises=non_entailed,
+        throughline=conclusion,
         entailed_premises=entailed,
-        syllogism=conclusion
+        non_entailed_premises=non_entailed
     )
 except ValidationError as e:
     print(f"Invalid record: {e}")
-    # Discard and continue
+    # Discard — never write with defaults
 ```
 
-Invalid records are DISCARDED, never written with defaults.
+Invalid records are **DISCARDED**, never written with fallback values.
+
+## Deterministic Ordering
+
+For reproducible training, sort triplets deterministically:
+
+```python
+# Hard-code sort key before serializing
+records.sort(key=lambda r: (
+    r.avg_char_pos,       # Position in original text
+    r.sentence_index,     # Sentence number
+    r.triplet_index       # Triplet order within sentence
+))
+
+# avg_char_pos computed on original pre-cleaning text
+avg_char_pos = original.find(sentence) + len(sentence) / 2
+```
 
 ## Token Length Filtering
 
-When records vary materially in token length:
+When records vary materially in token length, filter using Box-Cox transform:
 
 ```python
 import numpy as np
 from scipy import stats
 
-# Tokenize
+# Tokenize records
 tokens_per_record = [len(tokenizer.encode(r)) for r in records]
 
-# Log-normalize and Box-Cox transform
+# Log-normalize and transform
 log_lengths = np.log1p(tokens_per_record)
 transformed, lambda_param = stats.boxcox(log_lengths)
 
@@ -241,69 +429,107 @@ transformed, lambda_param = stats.boxcox(log_lengths)
 median_transformed = np.median(transformed)
 mad = stats.median_abs_deviation(transformed)
 
-# Discard outliers: median ± 2*MAD
+# Keep records within median ± 2*MAD
 keep_idx = np.abs(transformed - median_transformed) <= 2 * mad
 filtered = [r for i, r in enumerate(records) if keep_idx[i]]
+
+print(f"Kept {len(filtered)}/{len(records)} records (within MAD bounds)")
 ```
 
-Result: Removes extremely long/short records while preserving distribution.
+Result: Removes extremely long/short records while preserving distribution
 
-## Integration with Training
+## Integration Pipeline
 
-In `src/serialize_training_format.py`:
+### Generation → Validation → Training → Inference
 
-```python
-from training_config import TrainingFormat
-
-formatter = TrainingFormat.PEDAGOGICAL  # Select format
-
-# Serialize
-records_serialized = formatter.serialize_batch(reasoning_examples)
-
-# Export to JSONL
-with open("train.jsonl", "w") as f:
-    for record in records_serialized:
-        f.write(json.dumps(record) + "\n")
+```
+User Quotes
+    ↓
+[Generate via LLM]  (Logical order)
+    ↓
+[Validate with Pydantic]
+    ↓
+[Transform to Pedagogical]
+    ↓
+[Export to JSONL]
+    ↓
+[QLoRA Training]
+    ↓
+[Model learns pedagogical order]
+    ↓
+[Inference on new quotes]
+    ↓
+[Extract confidence]
+    ↓
+[SPO Optimization]
+    ↓
+[Calibrated confidence model]
 ```
 
-In training script:
+## Examples
 
-```python
-# Load JSONL
-dataset = load_dataset("json", data_files="train.jsonl", split="train")
+### Complete Generation → Training → Inference Cycle
 
-# Data is ready for QLoRA training
-trainer = SFTTrainer(
-    model=model,
-    train_dataset=dataset,
-    formatting_func=lambda examples: {
-        "text": examples["output_text"]
-    },
-    # ... other args
-)
+**Generation (Logical):**
+```
+Input:
+"By the pricking of my thumbs, Something wicked this way comes."
+
+Completion:
+```
+Throughline:
+  When one feels a premonition, something wicked or dangerous approaches.
+
+Entailed Premises:
+  - premonition | signals (observed, confidence=1.0) | danger
+  - something | is (inferred, confidence=0.85) | wicked
+
+Non Entailed Premises:
+  - thumbs | are (inferred, confidence=0.3) | sore
+```
 ```
 
-## Troubleshooting
+**Training (Pedagogical):**
+```json
+{
+  "input_text": "By the pricking of my thumbs, Something wicked this way comes.",
+  "output_text": "Non Entailed Premises:\n  - thumbs | are (inferred, confidence=0.3) | sore\n\nEntailed Premises:\n  - premonition | signals (observed, confidence=1.0) | danger\n  - something | is (inferred, confidence=0.85) | wicked\n\nThroughline:\n  When one feels a premonition, something wicked or dangerous approaches."
+}
+```
 
-**Issue: Model outputs wrong format**
-- Check confidence scores are 0.0-1.0 (not 0-100)
-- Verify evidence_tags are lowercase ("observed" not "Observed")
-- Use constrained decoding if format violations persist
+**Inference (Pedagogical — learned from training):**
+```
+Input:
+"Beware the Ides of March."
 
-**Issue: Token length causes OOM**
-- Apply token length filtering (see above)
-- Reduce batch size
-- Use gradient accumulation
+Completion:
+```
+Non Entailed Premises:
+  - calendar | has (inferred, confidence=0.2) | religious significance
 
-**Issue: Confidence not calibrated**
-- Train with PEDAGOGICAL order first
-- Then run SPO optimization phase
-- Verify reward computation: correctness × confidence
+Entailed Premises:
+  - warning | signals (observed, confidence=1.0) | caution
+  - caution | indicates (inferred, confidence=0.88) | danger
+  - danger | is (inferred, confidence=0.92) | impending
+
+Throughline:
+  A specific date carries historical and ominous significance as a warning of impending danger.
+```
+```
+
+**SPO Optimization:**
+```
+Extracted confidence: [0.2, 1.0, 0.88, 0.92]
+Average: 0.75
+If correctness=0.9 → reward = 0.9 × 0.75 = 0.675
+Model learns this is good prediction (high correctness, reasonable confidence)
+```
 
 ## References
 
-- Original format spec: `src/training_config.py`
-- Serialization: `src/serialize_training_format.py`
-- Data pipeline: `src/synthetic_generator.py`
-- SPO optimization: `src/spo_trainer.py`
+- Pydantic schema: `src/synthetic_generator.py`
+- SPO trainer: `src/spo_trainer.py`
+- Data pipeline: `src/pipeline.py`
+- Format configuration: `src/training_config.py`
 - Examples: `data/SEEING_IS_BELIEVING_EXAMPLES.md`
+- Architecture guide: `docs/architecture/README.md`

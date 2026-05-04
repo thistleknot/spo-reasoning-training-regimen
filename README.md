@@ -70,6 +70,78 @@ That path creates template-backed examples immediately. If you want model-backed
 4. Configure inference via `docs/inference/README.md`
 5. Add SPO calibration if you want confidence to mean something downstream
 
+## Synthetic generation -> training example
+
+The same quote moves through a few different shapes before it becomes a training row.
+
+### 1. Synthetic generation scaffold
+
+This is where the earlier comment about **`Candidate NOT_ENTAILED (for negative inference)`** shows up. It is an upstream extraction/preprocessing label, not the final heading the trained model is supposed to emit.
+
+```text
+Input:
+"By the pricking of my thumbs, Something wicked this way comes."
+
+Candidate NOT_ENTAILED (for negative inference):
+  - thumbs | are (observed, confidence=1.0) | pricking
+
+Completion:
+Throughline:
+  When one feels a premonition or intuitive sense, something bad is approaching.
+
+Entailed Premises:
+  - something | is (inferred, confidence=0.75) | wicked
+  - something | is (inferred, confidence=0.8) | coming
+
+Non-Entailed Premises:
+  - thumbs | are (observed, confidence=1.0) | pricking
+```
+
+### 2. Preprocessed structured record
+
+The preprocessing step strips hybrid markdown wrappers, extracts named sections, normalizes missing values, and turns the scaffold into a clean structured record:
+
+```json
+{
+  "quote": "By the pricking of my thumbs, Something wicked this way comes.",
+  "candidate_not_entailed": [
+    "thumbs | are (observed, confidence=1.0) | pricking"
+  ],
+  "entailed_premises": [
+    "something | is (inferred, confidence=0.75) | wicked",
+    "something | is (inferred, confidence=0.8) | coming"
+  ],
+  "non_entailed_premises": [
+    "thumbs | are (observed, confidence=1.0) | pricking"
+  ],
+  "syllogism": "When one feels a premonition or intuitive sense, something bad is approaching."
+}
+```
+
+### 3. Training row actually fed to the model
+
+The serializer then converts that structured record into the pedagogical training format used for QLoRA:
+
+```text
+"By the pricking of my thumbs, Something wicked this way comes."
+
+Non-Entailed Premises:
+thumbs | are (observed, confidence=1.0) | pricking
+
+Entailed Premises:
+something | is (inferred, confidence=0.75) | wicked
+something | is (inferred, confidence=0.8) | coming
+
+Throughline:
+When one feels a premonition or intuitive sense, something bad is approaching.
+```
+
+So the short answer to the prior question is:
+
+- **`Candidate NOT_ENTAILED (for negative inference)`** is useful upstream as extraction context
+- **`Non-Entailed Premises`** is the canonical section name in the training and landing-page examples
+- The landing README now shows both so the transformation is explicit
+
 ## Why the format matters
 
 The core design choice is that the repo uses different orders for different stages of the pipeline.
@@ -83,6 +155,29 @@ The core design choice is that the repo uses different orders for different stag
 This matters because the training target is not just "state the answer." It teaches the model what does **not** support the conclusion before teaching what does. That is the job of **Candidate NOT_ENTAILED** premises.
 
 For the full specification, examples, and exact `Input` / `Completion` layout, read `docs/format/README.md`.
+
+## How the data gets cleaned before training
+
+The repo's filtering/cleaning path is conservative and explicit rather than magic:
+
+1. **Parse the hybrid record** via `src/preprocess_training_data.py`
+   - Pull the quote out of `input_text`
+   - Extract `Candidate NOT_ENTAILED`, `Entailed Premises`, `Non-Entailed Premises`, and `Conclusion` / `Syllogism`
+2. **Normalize section values**
+   - Empty or explicit `N/A` sections become `None` in the structured record
+   - Missing markdown wrappers are handled by the section extractor when possible
+3. **Preserve reasoning signal**
+   - Triplets stay intact
+   - Evidence tags and confidence annotations are preserved
+   - The cleaned corpus keeps the mojibake-fixed records in `data/train_clean_for_model_967.jsonl`
+4. **Drop malformed rows at preprocessing time**
+   - If a line fails JSON parsing or record conversion, it increments the preprocessing error count and is not written to the cleaned output
+5. **Serialize survivors into training format**
+   - `src/serialize_training_format.py` writes the final pedagogical order:
+     `Non-Entailed Premises -> Entailed Premises -> Throughline`
+   - Empty sections are written back out as explicit `N/A`
+
+In other words, the repo is not training directly on whatever the generator spit out. It parses, normalizes, preserves the reasoning metadata, and only then serializes the clean training rows.
 
 ## Model configuration: where it lives
 

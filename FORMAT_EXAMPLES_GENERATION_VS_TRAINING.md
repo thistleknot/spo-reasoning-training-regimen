@@ -149,8 +149,8 @@ File: data/train_clean_for_model_967.jsonl
 
 Each line: {"input_text": "...", "output_text": "..."}
 
-input_text = quote + Non-Entailed + Entailed + Throughline
-output_text = same as input_text (model learns to reproduce this exact format)
+input_text = explicit instruction prompt over the quote
+output_text = Non-Entailed + Entailed + Throughline
 ```
 
 ---
@@ -160,11 +160,13 @@ output_text = same as input_text (model learns to reproduce this exact format)
 When the trained model is asked to generate reasoning for a NEW quote, the base target remains confidence-free and any numeric scoring is applied later by a judge or calibrator:
 
 ```
-Input:  "Some new quote here"
-Output: [Generation Format: Throughline → Entailed → Non-Entailed]
+Input:  prompted quote instruction wrapped in the model chat template
+Output: [Training target order: Non-Entailed → Entailed → Throughline]
 ```
 
-The model learns to produce this logical ordering for readability.
+The model is trained to produce the pedagogical ordering it saw during
+fine-tuning, while generation/inference still uses the same chat-turn surface as
+training.
 
 ---
 

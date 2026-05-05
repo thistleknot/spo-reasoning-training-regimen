@@ -118,7 +118,7 @@ This repo now has three adjacent dataset families:
 2. `train_facts_with_confidence_967.jsonl` — quote -> premises with confidence
 3. `train_syllogism_with_confidence_967.jsonl` — quote + confidence-bearing facts -> throughline + confidence
 
-Use the first regimen to teach reasoning structure. Use the other two as follow-on multi-task or staged fine-tuning datasets.
+Use the first regimen to teach reasoning structure. That base corpus now uses an explicit instruction prompt and chat-formatted supervision, rather than a bare quote, so Qwen sees the same task contract during fine-tuning and inference. Use the other two as follow-on multi-task or staged fine-tuning datasets.
 
 ### Build the Follow-On Regimens
 
@@ -143,7 +143,7 @@ The repo now has a first-class curriculum object in `src/training_strategy.py`. 
 ### Default stages
 
 1. **Base warm start**  
-   Train on `train_clean_for_model_967.jsonl` first so the adapter learns quote -> premises + throughline without frozen numeric targets.
+   Train on `train_clean_for_model_967.jsonl` first so the adapter learns prompted quote -> premises + throughline without frozen numeric targets.
 2. **Multi-task mix**  
    Add the two confidence-bearing regimens with the base task still dominant.
 3. **Optional score refinement**  
@@ -244,12 +244,15 @@ Example:
 python -m src.run_ablation_matrix \
   --output-dir output/ablations_run \
   --holdout-fraction 0.1 \
-  --max-holdout-records 32
+  --max-holdout-records 32 \
+  --experiment base-only
 ```
 
 This writes per-experiment `results.json` files plus a top-level `ablation_summary.json`.
 It also writes `holdout_examples.md`, which shows the sampled holdout prompts,
 expected outputs, and each ablation's generated output side by side.
+The runner also prints per-experiment and per-stage progress lines so long QLoRA
+runs no longer appear idle.
 
 ### Format Data for Training
 
@@ -397,27 +400,19 @@ Throughline:
 
 If you still want SPO-style optimization, do it after the base model is already emitting premises + throughline reliably:
 
-```python
-from src.spo_trainer import SPOTrainer, SPOEvaluator
-
-# Create SPO trainer
-spo_trainer = SPOTrainer(
-    model=model,
-    tokenizer=tokenizer,
-    evaluation_fn=SPOEvaluator.composite_score,
-    beta=0.1,  # KL penalty
-)
-
-# SPO training loop
-for epoch in range(spo_epochs):
-    for batch in spo_dataloader:
-        metrics = spo_trainer.training_step(batch, ground_truth)
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+```bash
+python -m src.run_spo_training \
+  --adapter-path output/ablations_chatfix_baseonly/base-only/adapter \
+  --dataset-path data/train_facts_with_confidence_967.jsonl \
+  --output-dir output/spo_chatfix_facts \
+  --evaluation-metric triplet \
+  --num-epochs 1
 ```
 
-See `../../src/spo_trainer.py` for full SPO implementation.
+This runner reuses the repo's chat-formatted training examples, loads the
+specified adapter as a trainable PEFT model, applies reward-weighted loss via
+`src/spo_trainer.py`, saves the updated adapter, and writes `spo_summary.json`
+with per-step loss/reward history plus holdout reward aggregates.
 
 ## Saving and Loading
 

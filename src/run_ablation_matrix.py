@@ -31,7 +31,13 @@ from transformers import (
     TrainingArguments,
 )
 
+from .chat_format import (
+    build_generation_prompt,
+    build_training_conversation,
+    strip_response_preamble,
+)
 from .evaluate_regimens import EvalRecord, evaluate_confidence_utility
+from .preprocess_training_data import extract_section, parse_triplet_list
 from .spo_trainer import SPOEvaluator
 from .training_strategy import RegimenName, TrainingStrategy
 
@@ -62,6 +68,7 @@ class AblationConfig:
     logging_steps: int = 10
     max_train_records_per_regimen: int | None = None
     max_holdout_records: int | None = None
+    experiment_names: List[str] | None = None
 
 
 def load_jsonl(path: Path) -> List[dict]:
@@ -97,16 +104,16 @@ def build_training_examples(
     examples = []
     for record in records:
         prompt_text, completion_text = training_text(record)
-        full_text = f"{prompt_text}\n\n{completion_text}"
+        full_text = build_training_conversation(tokenizer, prompt_text, completion_text)
         encoded = tokenizer(
             full_text,
             truncation=True,
             max_length=max_length,
-            add_special_tokens=True,
+            add_special_tokens=False,
         )
         prompt_length = len(
             tokenizer(
-                f"{prompt_text}\n\n",
+                build_generation_prompt(tokenizer, prompt_text),
                 truncation=True,
                 max_length=max_length,
                 add_special_tokens=False,
@@ -263,19 +270,28 @@ def generate_completion(model, tokenizer, prompt: str, max_new_tokens: int) -> s
     if hasattr(model, "gradient_checkpointing_disable"):
         model.gradient_checkpointing_disable()
     model.config.use_cache = True
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+    chat_prompt = build_generation_prompt(tokenizer, prompt)
+    inputs = tokenizer(
+        chat_prompt,
+        return_tensors="pt",
+        add_special_tokens=False,
+    ).to(model.device)
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
             max_new_tokens=max_new_tokens,
             do_sample=False,
             pad_token_id=tokenizer.pad_token_id,
+            eos_token_id=tokenizer.eos_token_id,
             use_cache=True,
+            repetition_penalty=1.3,
+            no_repeat_ngram_size=4,
         )
-    return tokenizer.decode(
+    decoded = tokenizer.decode(
         outputs[0][inputs["input_ids"].shape[1] :],
         skip_special_tokens=True,
     ).strip()
+    return strip_response_preamble(decoded)
 
 
 def throughline_quality(predicted: str, expected: str) -> float:
@@ -284,11 +300,70 @@ def throughline_quality(predicted: str, expected: str) -> float:
     return round((heuristic + similarity) / 2, 4)
 
 
+def parse_reasoning_output(text: str) -> dict:
+    """Extract the canonical base-reasoning sections from generated text."""
+    throughline = extract_section(text, "Throughline")
+    entailed = parse_triplet_list(extract_section(text, "Entailed Premises")) or []
+    non_entailed = parse_triplet_list(extract_section(text, "Non-Entailed Premises")) or []
+    return {
+        "throughline": throughline.strip() if throughline else "",
+        "entailed": entailed,
+        "non_entailed": non_entailed,
+    }
+
+
+def normalize_triplet(triplet: str) -> str:
+    """Canonicalize a triplet for set comparison."""
+    return re.sub(r"\s+", " ", triplet.strip().lower())
+
+
+def triplet_overlap_score(predicted: Sequence[str], expected: Sequence[str]) -> float:
+    """Compute an F1-style overlap score between predicted and expected triplets."""
+    predicted_set = {normalize_triplet(triplet) for triplet in predicted if triplet.strip()}
+    expected_set = {normalize_triplet(triplet) for triplet in expected if triplet.strip()}
+    if not expected_set:
+        return 1.0 if not predicted_set else 0.0
+    if not predicted_set:
+        return 0.0
+
+    matches = predicted_set & expected_set
+    precision = len(matches) / len(predicted_set)
+    recall = len(matches) / len(expected_set)
+    if precision + recall == 0:
+        return 0.0
+    return round((2 * precision * recall) / (precision + recall), 4)
+
+
 def base_reasoning_quality(predicted_output: str, expected_output: str) -> float:
-    triplet_score = SPOEvaluator.evaluate_triplet_correctness(predicted_output, expected_output)
-    predicted_throughline = extract_throughline(predicted_output)
-    expected_throughline = extract_throughline(expected_output)
-    return round((triplet_score + throughline_quality(predicted_throughline, expected_throughline)) / 2, 4)
+    required_headers = ("Non-Entailed Premises:", "Entailed Premises:", "Throughline:")
+    if not all(header in predicted_output for header in required_headers):
+        return 0.0
+
+    predicted = parse_reasoning_output(predicted_output)
+    expected = parse_reasoning_output(expected_output)
+    if not predicted["throughline"]:
+        return 0.0
+
+    structure_score = sum(
+        1.0 if predicted[section] else 0.0
+        for section in ("non_entailed", "entailed", "throughline")
+    ) / 3
+    non_entailed_score = triplet_overlap_score(
+        predicted["non_entailed"],
+        expected["non_entailed"],
+    )
+    entailed_score = triplet_overlap_score(
+        predicted["entailed"],
+        expected["entailed"],
+    )
+    throughline_score = throughline_quality(
+        predicted["throughline"],
+        expected["throughline"],
+    )
+    return round(
+        (structure_score + non_entailed_score + entailed_score + throughline_score) / 4,
+        4,
+    )
 
 
 def run_quality_eval(model, tokenizer, holdout_records: Sequence[dict], config: AblationConfig) -> dict:
@@ -506,11 +581,23 @@ def run_ablation_matrix(config: AblationConfig) -> dict:
     mix_stage = next(stage for stage in strategy.stages if stage.name == "multitask-mix")
     warm_stage = next(stage for stage in strategy.stages if stage.name == "base-warm-start")
 
-    for experiment in strategy.ablations:
+    ablations = strategy.ablations
+    if config.experiment_names:
+        selected = set(config.experiment_names)
+        ablations = [experiment for experiment in strategy.ablations if experiment.name in selected]
+        if not ablations:
+            raise ValueError(f"No ablations matched --experiment values: {sorted(selected)}")
+
+    for experiment_index, experiment in enumerate(ablations, start=1):
         experiment_dir = output_root / experiment.name
+        print(f"[{experiment_index}/{len(ablations)}] {experiment.name}: loading model")
         model, tokenizer = load_model_and_tokenizer(config.model_name)
         target_size = len(train_sets[RegimenName.BASE_REASONING.value])
 
+        print(
+            f"[{experiment_index}/{len(ablations)}] {experiment.name}: "
+            f"warm start on {len(train_sets[RegimenName.BASE_REASONING.value])} records"
+        )
         train_stage(
             model=model,
             tokenizer=tokenizer,
@@ -528,6 +615,10 @@ def run_ablation_matrix(config: AblationConfig) -> dict:
                 target_size=target_size,
                 seed=config.seed,
             )
+            print(
+                f"[{experiment_index}/{len(ablations)}] {experiment.name}: "
+                f"mixture stage on {len(stage_records)} records"
+            )
             train_stage(
                 model=model,
                 tokenizer=tokenizer,
@@ -538,9 +629,17 @@ def run_ablation_matrix(config: AblationConfig) -> dict:
                 stage_name=mix_stage.name,
             )
 
+        print(
+            f"[{experiment_index}/{len(ablations)}] {experiment.name}: "
+            f"quality eval on {len(holdout_base)} holdout records"
+        )
         quality_report = run_quality_eval(model, tokenizer, holdout_base, config)
         confidence_report = None
         if RegimenName.SYLLOGISM_WITH_CONFIDENCE.value in experiment.enabled_regimens:
+            print(
+                f"[{experiment_index}/{len(ablations)}] {experiment.name}: "
+                f"confidence eval on {len(holdout_syllogism)} holdout records"
+            )
             confidence_report = run_confidence_eval(model, tokenizer, holdout_syllogism, config)
 
         experiment_dir.mkdir(parents=True, exist_ok=True)
@@ -584,6 +683,13 @@ if __name__ == "__main__":
     parser.add_argument("--logging-steps", type=int, default=10)
     parser.add_argument("--max-train-records-per-regimen", type=int, default=None)
     parser.add_argument("--max-holdout-records", type=int, default=None)
+    parser.add_argument(
+        "--experiment",
+        dest="experiment_names",
+        action="append",
+        default=None,
+        help="Limit the run to one or more ablation names",
+    )
     args = parser.parse_args()
 
     result = run_ablation_matrix(
@@ -603,6 +709,7 @@ if __name__ == "__main__":
             logging_steps=args.logging_steps,
             max_train_records_per_regimen=args.max_train_records_per_regimen,
             max_holdout_records=args.max_holdout_records,
+            experiment_names=args.experiment_names,
         )
     )
     print(json.dumps(result, indent=2))

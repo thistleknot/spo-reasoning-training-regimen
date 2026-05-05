@@ -18,6 +18,39 @@ CONFIDENCE_ANNOTATION_RE = re.compile(
 )
 
 
+def normalize_quote_text(quote: str) -> str:
+    """Normalize a quote so the prompt surface adds exactly one quote wrapper."""
+    return str(quote).strip().strip('"').strip("“").strip("”").strip()
+
+
+def build_base_reasoning_prompt(quote: str) -> str:
+    """Build the canonical base-regimen prompt surface.
+
+    Preconditions:
+        `quote` is the raw quote text from the structured corpus.
+    Failure modes:
+        Returns a best-effort prompt even when the quote is empty.
+    """
+    normalized_quote = normalize_quote_text(quote)
+    return "\n".join(
+        [
+            "Given this quote, extract the implicit reasoning.",
+            "",
+            f'Quote: "{normalized_quote}"',
+            "",
+            "Generate a response with:",
+            "1. Non-Entailed Premises",
+            "2. Entailed Premises",
+            "3. Throughline",
+            "",
+            "Format each premise as: subject | relation (tag) | object",
+            '- tag: "observed" for explicit facts, "inferred" for derived facts',
+            "",
+            "Response:",
+        ]
+    )
+
+
 def strip_confidence_annotation(triplet: str) -> str:
     """Remove numeric confidence while preserving the evidence tag.
 
@@ -73,8 +106,7 @@ def serialize_training_record(
     entailed = structured_record.get("entailed_premises")
     throughline = structured_record.get("syllogism")  # Use syllogism key for now, renamed to throughline in output
     
-    # INPUT: quote only. The user explicitly wants quote -> premises + throughline.
-    input_text = f'"{quote}"'
+    input_text = build_base_reasoning_prompt(quote)
 
     output_lines = [
         "Non-Entailed Premises:",

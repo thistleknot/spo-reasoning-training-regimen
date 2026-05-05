@@ -9,6 +9,8 @@ from typing import List, Dict, Optional
 from dataclasses import dataclass
 from pydantic import BaseModel, Field
 
+from .serialize_training_format import build_base_reasoning_prompt
+
 
 class TripletItem(BaseModel):
     """A single triplet in premise format."""
@@ -161,8 +163,7 @@ class SyntheticReasoningGenerator:
         """
         with open(path, "w") as f:
             for example in self.examples:
-                # Input: just the quote
-                input_text = f'"{example.quote}"'
+                input_text = build_base_reasoning_prompt(example.quote)
 
                 # Output: pedagogical format (Non-Entailed → Entailed → Syllogism)
                 non_entailed_str = "\n".join(

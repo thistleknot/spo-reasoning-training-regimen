@@ -28,7 +28,7 @@ from enum import Enum
 from typing import Optional
 
 from .preprocess_training_data import preprocess_training_record
-from .serialize_training_format import triplets_to_text
+from .serialize_training_format import normalize_quote_text, triplets_to_text
 
 
 CONFIDENCE_RE = re.compile(r"confidence\s*[:=]\s*([0-9]*\.?[0-9]+)")
@@ -67,7 +67,7 @@ def normalize_record(record: dict) -> dict:
 
 def serialize_facts_with_confidence_record(structured_record: dict) -> dict:
     """Build a quote -> facts-with-confidence training record."""
-    quote = structured_record.get("quote", "")
+    quote = normalize_quote_text(structured_record.get("quote", ""))
     non_entailed = structured_record.get("non_entailed_premises")
     entailed = structured_record.get("entailed_premises")
 
@@ -119,7 +119,7 @@ def aggregate_syllogism_confidence(entailed_premises: Optional[list[str]]) -> Op
 
 def serialize_syllogism_with_confidence_record(structured_record: dict) -> dict:
     """Build a fact-conditioned syllogism-with-confidence training record."""
-    quote = structured_record.get("quote", "")
+    quote = normalize_quote_text(structured_record.get("quote", ""))
     non_entailed = structured_record.get("non_entailed_premises")
     entailed = structured_record.get("entailed_premises")
     syllogism = structured_record.get("syllogism") or "N/A"

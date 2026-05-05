@@ -4,10 +4,12 @@ Loads trained QLoRA adapter and generates reasoning in GENERATION FORMAT.
 Handles input parsing, generation, and output formatting.
 """
 
-import json
-import re
 from peft import AutoPeftModelForCausalLM
 from transformers import AutoTokenizer
+
+from .chat_format import build_generation_prompt, strip_response_preamble
+from .preprocess_training_data import extract_section, parse_triplet_list
+from .serialize_training_format import build_base_reasoning_prompt
 
 
 def load_model_and_tokenizer(adapter_path: str):
@@ -36,45 +38,22 @@ def extract_structured_output(raw_text: str) -> dict:
     Returns:
         dict with sections: throughline, entailed, non_entailed
     """
+    throughline = extract_section(raw_text, "Throughline")
+    if not throughline:
+        throughline = extract_section(raw_text, "Conclusion")
+    if not throughline:
+        throughline = extract_section(raw_text, "Syllogism")
+
+    entailed = parse_triplet_list(extract_section(raw_text, "Entailed Premises")) or []
+    non_entailed = (
+        parse_triplet_list(extract_section(raw_text, "Non-Entailed Premises")) or []
+    )
+
     sections = {
-        "throughline": None,
-        "entailed": [],
-        "non_entailed": []
+        "throughline": throughline or None,
+        "entailed": entailed,
+        "non_entailed": non_entailed,
     }
-    
-    # Parse throughline
-    throughline_match = re.search(
-        r"(?:Throughline|Conclusion):\s*\n\s*(.+?)(?=\n\n(?:Entailed|Non-Entailed)|$)",
-        raw_text,
-        re.DOTALL
-    )
-    if throughline_match:
-        sections["throughline"] = throughline_match.group(1).strip()
-    
-    # Parse entailed premises
-    entailed_match = re.search(
-        r"Entailed\s+Premises:\s*\n((?:(?:\s*-\s*.+\n)*)+)",
-        raw_text
-    )
-    if entailed_match:
-        premises = entailed_match.group(1)
-        for line in premises.split("\n"):
-            line = line.strip()
-            if line and line.startswith("-"):
-                sections["entailed"].append(line[1:].strip())
-    
-    # Parse non-entailed premises
-    non_entailed_match = re.search(
-        r"Non-Entailed\s+Premises:\s*\n((?:(?:\s*-\s*.+\n)*)+)",
-        raw_text
-    )
-    if non_entailed_match:
-        premises = non_entailed_match.group(1)
-        for line in premises.split("\n"):
-            line = line.strip()
-            if line and line.startswith("-"):
-                sections["non_entailed"].append(line[1:].strip())
-    
     return sections
 
 
@@ -136,8 +115,10 @@ def infer(
         quote: The quote to reason about
         model: Loaded model
         tokenizer: Loaded tokenizer
-        not_entailed_premises: Optional list of false premises for contrastive context
-        entailed_premises: Optional list of true premises
+        not_entailed_premises: Retained for backward compatibility but ignored.
+            The canonical base-reasoning adapter is trained on the base prompt.
+        entailed_premises: Retained for backward compatibility but ignored.
+            Premise-conditioned prompting belongs to the follow-on regimens.
         max_tokens: Maximum tokens to generate
         temperature: Sampling temperature
         top_p: Top-p sampling parameter
@@ -148,35 +129,23 @@ def infer(
             - structured: Parsed sections
             - formatted: GENERATION FORMAT output
     """
-    # Build training-format input (what model was trained on)
-    input_text = quote + "\n\n"
-    
-    # Add non-entailed premises if provided
-    if not_entailed_premises:
-        input_text += "Non-Entailed Premises:\n"
-        for premise in not_entailed_premises:
-            input_text += f"  - {premise}\n"
-    else:
-        input_text += "Non-Entailed Premises:\n  - N/A\n"
-    
-    # Add entailed premises if provided
-    if entailed_premises:
-        input_text += "\nEntailed Premises:\n"
-        for premise in entailed_premises:
-            input_text += f"  - {premise}\n"
-    else:
-        input_text += "\nEntailed Premises:\n  - N/A\n"
-    
-    input_text += "\nThroughline:\n  N/A"
-    
-    # Generate
-    inputs = tokenizer(input_text, return_tensors="pt").to(model.device)
+    input_text = build_base_reasoning_prompt(quote)
+
+    do_sample = temperature > 0
+    prompt = build_generation_prompt(tokenizer, input_text)
+    inputs = tokenizer(
+        prompt,
+        return_tensors="pt",
+        add_special_tokens=False,
+    ).to(model.device)
     outputs = model.generate(
         **inputs,
         max_new_tokens=max_tokens,
-        temperature=temperature,
-        top_p=top_p,
-        do_sample=True
+        temperature=temperature if do_sample else None,
+        top_p=top_p if do_sample else None,
+        do_sample=do_sample,
+        eos_token_id=tokenizer.eos_token_id,
+        pad_token_id=tokenizer.pad_token_id,
     )
     
     # Decode
@@ -184,6 +153,7 @@ def infer(
         outputs[0][inputs['input_ids'].shape[1]:],
         skip_special_tokens=True
     )
+    raw_output = strip_response_preamble(raw_output)
     
     # Parse and format
     structured = extract_structured_output(raw_output)
@@ -209,10 +179,6 @@ if __name__ == "__main__":
         quote='"The greatest glory in living lies not in never falling, but in rising every time we fall."',
         model=model,
         tokenizer=tokenizer,
-        not_entailed_premises=[
-            "failure | is (observed, confidence=1.0) | permanent",
-            "struggle | is (observed, confidence=1.0) | shameful"
-        ]
     )
     
     print("\n" + "="*80)

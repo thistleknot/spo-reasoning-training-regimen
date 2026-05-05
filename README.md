@@ -113,10 +113,22 @@ The preprocessing step strips hybrid markdown wrappers, extracts named sections,
 
 ### 3. Training row actually fed to the model
 
-The serializer then converts that structured record into the pedagogical training format used for QLoRA. Evidence tags stay; numeric confidence is stripped so the base model learns premises and throughline text rather than frozen scores:
+The serializer then converts that structured record into the pedagogical training format used for QLoRA. The base regimen now uses an explicit task prompt plus chat-formatted supervision so the instruct model sees the same contract at train and inference time. Evidence tags stay; numeric confidence is stripped so the base model learns premises and throughline text rather than frozen scores:
 
 ```text
-"By the pricking of my thumbs, Something wicked this way comes."
+Given this quote, extract the implicit reasoning.
+
+Quote: "By the pricking of my thumbs, Something wicked this way comes."
+
+Generate a response with:
+1. Non-Entailed Premises
+2. Entailed Premises
+3. Throughline
+
+Format each premise as: subject | relation (tag) | object
+- tag: "observed" for explicit facts, "inferred" for derived facts
+
+Response:
 
 Non-Entailed Premises:
 thumbs | are (observed) | pricking
@@ -135,7 +147,7 @@ The repo now supports three adjacent supervised tasks over the same synthetic so
 
 | Regimen | Input | Output | Numeric confidence |
 |---|---|---|---|
-| Base reasoning | Quote | Non-entailed + entailed premises + throughline | Stripped |
+| Base reasoning | Prompted quote instruction | Non-entailed + entailed premises + throughline | Stripped |
 | Facts with confidence | Quote | Non-entailed + entailed premises | Preserved |
 | Syllogism with confidence | Quote + confidence-bearing facts | Throughline + aggregate confidence | Preserved |
 
@@ -197,7 +209,8 @@ If you want to run the ablation matrix directly, use:
 python -m src.run_ablation_matrix \
   --output-dir output/ablations_run \
   --holdout-fraction 0.1 \
-  --max-holdout-records 32
+  --max-holdout-records 32 \
+  --experiment base-only
 ```
 
 That run now emits:
@@ -205,6 +218,31 @@ That run now emits:
 - per-experiment `results.json`
 - `ablation_summary.json`
 - `holdout_examples.md` with side-by-side sampled holdout outputs for each ablation
+- live per-experiment and per-stage progress lines during training/eval
+
+If you want to run the repo's SPO fine-tuning stage on a confidence-bearing dataset, use:
+
+```bash
+python -m src.run_spo_training \
+  --adapter-path output/ablations_chatfix_baseonly/base-only/adapter \
+  --dataset-path data/train_facts_with_confidence_967.jsonl \
+  --output-dir output/spo_chatfix_facts \
+  --evaluation-metric triplet \
+  --num-epochs 1
+```
+
+That run writes a new adapter plus `spo_summary.json` with per-step loss/reward history.
+
+**SPO reward design notes:**
+
+- Rewards are pre-computed from the training data itself — no generation inside the training loop.
+  Each sample gets a quality weight based on: unique-premises ratio, mean predicate specificity,
+  and subject diversity (outputs where every line starts with `the speaker` are down-weighted).
+- `evaluate_triplet_correctness` hard-zeros any output where more than half the triplet lines are
+  duplicates, and deducts for self-referential triplets (e.g. `subject | is | is subject`).
+  This prevents the SPO loop from reinforcing repetitive looping behaviour.
+- Generation uses `repetition_penalty=1.3` and `no_repeat_ngram_size=4` throughout. Without these,
+  greedy decoding on an under-trained model produces exact-line repetition indefinitely.
 
 ## Why the format matters
 

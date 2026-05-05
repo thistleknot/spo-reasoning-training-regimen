@@ -5,10 +5,12 @@ penalize low-confidence or incorrect outputs. This teaches the model to assign
 accurate confidence to its own predictions.
 """
 
-from typing import Callable, Dict, Any, Optional, Tuple
-from dataclasses import dataclass
-import torch
 import json
+import re
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, Optional, Tuple
+
+import torch
 
 
 @dataclass
@@ -54,14 +56,22 @@ class SPOTrainer:
     def extract_confidence(self, output: str) -> float:
         """Extract confidence score from model output.
 
-        Looks for patterns like "confidence=0.8" in triplet format.
+        Looks for either triplet confidence annotations (`confidence=0.8`) or an
+        explicit `Confidence:` section in score-bearing outputs.
         """
-        import re
-
-        matches = re.findall(r"confidence=([0-9.]+)", output)
+        matches = re.findall(r"confidence\s*=\s*([0-9]*\.?[0-9]+)", output)
         if matches:
             # Return average confidence
             return sum(float(m) for m in matches) / len(matches)
+
+        section_match = re.search(
+            r"Confidence:\s*(?:\n\s*)?([0-9]*\.?[0-9]+)",
+            output,
+            flags=re.IGNORECASE,
+        )
+        if section_match:
+            return float(section_match.group(1))
+
         return 0.5  # Default
 
     def evaluate_batch(
@@ -80,6 +90,13 @@ class SPOTrainer:
         Returns:
             Tuple of (rewards, metrics)
         """
+        if not outputs:
+            return [], {
+                "avg_correctness": 0.0,
+                "avg_confidence": 0.0,
+                "avg_reward": 0.0,
+            }
+
         rewards = []
         metrics = {
             "avg_correctness": 0.0,
@@ -129,69 +146,112 @@ class SPOTrainer:
         Returns:
             Loss tensor
         """
-        # Standard language modeling loss
-        loss_fn = torch.nn.CrossEntropyLoss(reduction="none")
+        if logits.ndim != 3:
+            raise ValueError("logits must have shape [batch, seq_len, vocab_size].")
+        if labels.ndim != 2:
+            raise ValueError("labels must have shape [batch, seq_len].")
+        if logits.size(0) != len(rewards):
+            raise ValueError("reward count must match batch size.")
+
+        shift_logits = logits[:, :-1, :].contiguous()
+        shift_labels = labels[:, 1:].contiguous()
+
+        loss_fn = torch.nn.CrossEntropyLoss(ignore_index=-100, reduction="none")
         token_loss = loss_fn(
-            logits.view(-1, logits.size(-1)),
-            labels.view(-1),
-        )
+            shift_logits.view(-1, shift_logits.size(-1)),
+            shift_labels.view(-1),
+        ).view(shift_labels.size())
+
+        valid_mask = shift_labels.ne(-100)
+        token_loss = token_loss * valid_mask
+        tokens_per_sequence = valid_mask.sum(dim=1).clamp_min(1)
+        sequence_loss = token_loss.sum(dim=1) / tokens_per_sequence
 
         # Weight by reward
         reward_weights = torch.tensor(
             [r.reward for r in rewards],
             device=logits.device,
             dtype=logits.dtype,
-        )
+        ).clamp_min(0.0)
 
-        # SPO loss: downweight low-reward sequences
-        weighted_loss = (token_loss * (1 - reward_weights)).mean()
+        # SPO loss: upweight high-reward sequences.
+        weighted_loss = (sequence_loss * reward_weights).mean()
 
         return weighted_loss
+
+    def compute_step(
+        self,
+        batch: Dict[str, Any],
+        ground_truths: Optional[list[str]] = None,
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+        """Compute one SPO optimization step.
+
+        When the batch includes pre-computed quality scores (`precomputed_rewards`),
+        those are used directly as reward weights instead of calling evaluate_batch on
+        gold outputs vs themselves, which would produce uniform rewards and degrade SPO
+        to plain SFT.
+
+        Args:
+            batch: Dict with `input_ids`, `attention_mask`, `labels`, `output_texts`,
+                and optionally `precomputed_rewards` (a float tensor of shape [batch]).
+            ground_truths: Optional list of reference outputs for fallback evaluation.
+
+        Returns:
+            Tuple of `(loss, metrics)` for this step.
+        """
+        input_ids = batch["input_ids"]
+        attention_mask = batch["attention_mask"]
+        labels = batch["labels"]
+        output_texts = batch.get("output_texts", [])
+        precomputed_rewards: Optional[torch.Tensor] = batch.get("precomputed_rewards")
+
+        # Forward pass
+        outputs = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            labels=None,
+        )
+
+        if precomputed_rewards is not None and len(precomputed_rewards) > 0:
+            # Use pre-scored data-quality weights directly — avoids gold-vs-gold evaluation.
+            reward_values = precomputed_rewards.tolist()
+            rewards = [SPOReward(correctness=r, confidence=r) for r in reward_values]
+            metrics = {
+                "avg_correctness": float(precomputed_rewards.mean()),
+                "avg_confidence": float(precomputed_rewards.mean()),
+                "avg_reward": float(precomputed_rewards.mean()),
+            }
+        else:
+            # Fallback: evaluate gold outputs against ground_truths
+            rewards, metrics = self.evaluate_batch(
+                inputs=[],
+                outputs=output_texts,
+                ground_truths=ground_truths or batch.get("ground_truths"),
+            )
+
+        # Compute loss
+        if rewards and output_texts:
+            loss = self.compute_loss(
+                outputs.logits,
+                rewards,
+                labels,
+            )
+            metrics["loss"] = loss.item()
+        else:
+            loss = outputs.loss if outputs.loss is not None else torch.tensor(0.0, device=input_ids.device)
+            metrics["loss"] = loss.item()
+
+        self.training_history.append(metrics.copy())
+        return loss, metrics
 
     def training_step(
         self,
         batch: Dict[str, Any],
         ground_truth: Optional[str] = None,
     ) -> Dict[str, float]:
-        """Single training step with SPO.
-
-        Args:
-            batch: Dict with 'input_ids', 'attention_mask', 'output_text'
-            ground_truth: Optional ground truth for evaluation
-
-        Returns:
-            Dict of metrics for this step
-        """
-        input_ids = batch["input_ids"]
-        attention_mask = batch["attention_mask"]
-        output_text = batch.get("output_text")
-
-        # Forward pass
-        outputs = self.model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            output_hidden_states=True,
-        )
-
-        # Evaluate rewards
-        rewards, metrics = self.evaluate_batch(
-            inputs=[],  # Not needed for this step
-            outputs=[output_text] if output_text else [],
-            ground_truths=[ground_truth] if ground_truth else [],
-        )
-
-        # Compute loss
-        if rewards and output_text:
-            loss = self.compute_loss(
-                outputs.logits,
-                rewards,
-                input_ids,
-            )
-            metrics["loss"] = loss.item()
-        else:
-            loss = outputs.loss if outputs.loss is not None else torch.tensor(0.0)
-            metrics["loss"] = loss.item()
-
+        """Compatibility wrapper returning metrics for a single SPO step."""
+        ground_truths = [ground_truth] if ground_truth is not None else None
+        _, metrics = self.compute_step(batch, ground_truths=ground_truths)
         return metrics
 
     def save_history(self, path: str):
@@ -211,36 +271,75 @@ class SPOEvaluator:
     @staticmethod
     def evaluate_triplet_correctness(
         model_output: str,
-        ground_truth: str,
+        ground_truth: Optional[str] = None,
     ) -> float:
         """Evaluate correctness of triplet-based output.
 
         Scores based on:
-        - Triplet format preservation (subject | relation | object)
-        - Confidence score presence
-        - Evidence tag correctness (observed vs inferred)
+        - Triplet format preservation (subject | relation | object) [0.4 weight]
+        - Confidence score presence [0.2 weight]
+        - Evidence tag correctness (observed vs inferred) [0.2 weight]
+        - Uniqueness ratio: hard-zero if > half the triplet lines are duplicates [gate]
+        - Non-self-referential content: deduct if tautological triplets dominate [0.1 weight]
+        - Ground-truth overlap via SequenceMatcher if provided [0.1 bonus]
 
         Returns score 0.0-1.0
         """
-        import re
+        if not model_output or not model_output.strip():
+            return 0.0
+
+        triplet_pattern = re.compile(r"[^|]+\s*\|\s*[^|]+\s*\|\s*[^|]+")
+        triplet_lines = [
+            line.strip()
+            for line in model_output.splitlines()
+            if triplet_pattern.search(line)
+        ]
+
+        # Uniqueness gate: heavy penalty for repetitive outputs
+        if triplet_lines:
+            unique_ratio = len(set(triplet_lines)) / len(triplet_lines)
+            if unique_ratio < 0.5:
+                return 0.0
 
         score = 0.0
-        max_score = 3.0
 
-        # Check triplet format
-        triplet_pattern = r"[^|]+\s*\|\s*[^|]+\s*\|\s*[^|]+"
-        if re.search(triplet_pattern, model_output):
-            score += 1.0
+        # Format check
+        if triplet_lines:
+            score += 0.4
 
-        # Check confidence scores
+        # Confidence annotation
         if re.search(r"confidence=", model_output):
-            score += 1.0
+            score += 0.2
 
-        # Check evidence tags
-        if re.search(r"(observed|inferred)", model_output):
-            score += 1.0
+        # Evidence tags
+        if re.search(r"\b(observed|inferred)\b", model_output):
+            score += 0.2
 
-        return score / max_score
+        # Tautology penalty: subject appears as a substring of the object field,
+        # e.g. "the speaker | is ... | is the speaker" or "x | is | x itself"
+        def _is_tautological(line: str) -> bool:
+            parts = [p.strip().lower() for p in line.split("|")]
+            if len(parts) < 3:
+                return False
+            subject = parts[0].strip()
+            # Strip parenthetical annotations from the object part before comparing
+            obj = re.sub(r"\(.*?\)", "", parts[2]).strip()
+            return len(subject) >= 3 and subject in obj
+
+        if triplet_lines:
+            taut_ratio = sum(1 for t in triplet_lines if _is_tautological(t)) / len(triplet_lines)
+            # Add up to 0.1 when tautology rate is zero, subtract when high
+            score += 0.1 * (1.0 - taut_ratio)
+
+        # Ground-truth overlap bonus (0.1)
+        if ground_truth and ground_truth.strip():
+            import difflib
+            overlap = difflib.SequenceMatcher(
+                None, model_output.strip(), ground_truth.strip()
+            ).ratio()
+            score += 0.1 * overlap
+
+        return min(score, 1.0)
 
     @staticmethod
     def evaluate_syllogism_quality(

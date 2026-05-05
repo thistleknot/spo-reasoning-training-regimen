@@ -34,7 +34,7 @@ Complete guide to example data and training artifacts.
 ### Production Training Data
 - **`train_clean_for_model_967.jsonl`** — 967 cleaned training records
   - Verified mojibake-free
-  - Input is quote only; output is pedagogical order (Non-Entailed → Entailed → Throughline)
+  - Input is an explicit reasoning instruction prompt over the quote; output is pedagogical order (Non-Entailed → Entailed → Throughline)
   - Real training dataset used in prior sessions
 
 - **`train_facts_with_confidence_967.jsonl`** — 967 fact-confidence records

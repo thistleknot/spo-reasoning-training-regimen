@@ -44,6 +44,9 @@ SECTION_HEADER_MARKERS = (
     "Throughline:",
     "Syllogism:",
     "Conclusion:",
+    "[NON-ENTAILED]",
+    "[ENTAILED]",
+    "[CONCLUSION]",
 )
 
 
@@ -81,11 +84,21 @@ def find_line_start(text: str, marker: str, start: int = 0) -> int:
 
 def extract_section(text: str, header: str) -> str:
     """Extract section content between a markdown header and the next header."""
-    header_variants = (
+    bracket_header_map = {
+        "Entailed Premises": "[ENTAILED]",
+        "Non-Entailed Premises": "[NON-ENTAILED]",
+        "Throughline": "[CONCLUSION]",
+        "Conclusion": "[CONCLUSION]",
+        "Syllogism": "[CONCLUSION]",
+    }
+    header_variants = [
         f"**{header}**",
         f"**{header}",
         f"{header}:",
-    )
+    ]
+    bracket_header = bracket_header_map.get(header)
+    if bracket_header:
+        header_variants.append(bracket_header)
     matches = [
         (variant, find_line_start(text, variant))
         for variant in header_variants
@@ -103,7 +116,7 @@ def extract_section(text: str, header: str) -> str:
     next_header = len(text)
     next_header_matches = [
         idx for marker in SECTION_HEADER_MARKERS
-        if marker != f"{header}:" and (idx := find_line_start(text, marker, content_start)) >= 0
+        if marker not in {f"{header}:", bracket_header_map.get(header)} and (idx := find_line_start(text, marker, content_start)) >= 0
     ]
     markdown_header = find_line_start(text, "**", content_start)
     if markdown_header >= 0:

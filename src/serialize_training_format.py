@@ -73,12 +73,10 @@ def serialize_training_record(
     entailed = structured_record.get("entailed_premises")
     throughline = structured_record.get("syllogism")  # Use syllogism key for now, renamed to throughline in output
     
-    # INPUT: Quote + Non-Entailed + Entailed + Throughline
-    # Pedagogical order: false premises first, true premises second, conclusion last
-    # No markdown markers, clean format for model
-    input_lines = [
-        f'"{quote}"',
-        "",
+    # INPUT: quote only. The user explicitly wants quote -> premises + throughline.
+    input_text = f'"{quote}"'
+
+    output_lines = [
         "Non-Entailed Premises:",
         triplets_to_text(non_entailed, include_confidence=include_confidence),
         "",
@@ -88,10 +86,7 @@ def serialize_training_record(
         "Throughline:",
         throughline or "N/A",
     ]
-    input_text = "\n".join(input_lines)
-    
-    # For training, output is same as input (the model is trained to reproduce this format)
-    output_text = input_text
+    output_text = "\n".join(output_lines)
     
     return {
         "input_text": input_text,

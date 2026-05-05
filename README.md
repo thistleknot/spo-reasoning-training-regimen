@@ -155,6 +155,57 @@ python -m src.build_training_regimens \
   --regimen syllogism_with_confidence
 ```
 
+The staged curriculum for mixing those regimens now lives in `src/training_strategy.py`. It encodes:
+
+1. base warm start
+2. multi-task mixture with the base task dominant
+3. optional later score refinement once better judge labels exist
+
+You can materialize the default strategy JSON with:
+
+```bash
+python -m src.training_strategy --output training_strategy.json
+```
+
+The downstream evaluation harness now lives in `src/evaluate_regimens.py`. It scores whether confidence is useful rather than whether it merely matches synthetic numbers:
+
+```bash
+python -m src.evaluate_regimens \
+  --input eval/scored_holdout.jsonl \
+  --acceptance-threshold 0.7
+```
+
+That JSONL should contain at least:
+
+```json
+{"quote":"...", "predicted_confidence":0.82, "syllogism_quality":0.91}
+```
+
+where `syllogism_quality` is your downstream judge or rubric score on a normalized 0-1 scale.
+
+If you need to rebuild the canonical corpora from recoverable upstream artifacts, use:
+
+```bash
+python -m src.rebuild_training_corpora \
+  --confidence-source /tmp/gen-qwen3-qlora/output/train_preprocessed_structured_967.jsonl \
+  --conclusion-source /tmp/triplet-abductive-native-full-20250501/output/train.section-format.backup.jsonl
+```
+
+If you want to run the ablation matrix directly, use:
+
+```bash
+python -m src.run_ablation_matrix \
+  --output-dir output/ablations_run \
+  --holdout-fraction 0.1 \
+  --max-holdout-records 32
+```
+
+That run now emits:
+
+- per-experiment `results.json`
+- `ablation_summary.json`
+- `holdout_examples.md` with side-by-side sampled holdout outputs for each ablation
+
 ## Why the format matters
 
 The core design choice is that the repo uses different orders for different stages of the pipeline.
@@ -211,6 +262,8 @@ spo-reasoning-training-regimen/
 ├── src/
 │   ├── synthetic_generator.py
 │   ├── build_training_regimens.py
+│   ├── training_strategy.py
+│   ├── evaluate_regimens.py
 │   ├── spo_trainer.py
 │   ├── pipeline.py
 │   ├── training_config.py

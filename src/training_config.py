@@ -165,6 +165,7 @@ class PipelineConfig:
     entity_normalization: EntityNormalization
     graph_traversal: GraphTraversal
     judge_config: JudgeConfig
+    training_strategy_path: Optional[str] = None
     
     def to_json(self, path: str):
         """Save to JSON file."""
@@ -173,6 +174,7 @@ class PipelineConfig:
             "entity_normalization": self.entity_normalization.to_dict(),
             "graph_traversal": self.graph_traversal.to_dict(),
             "judge_config": self.judge_config.to_dict(),
+            "training_strategy_path": self.training_strategy_path,
         }
         with open(path, "w") as f:
             json.dump(config_dict, f, indent=2)
@@ -188,6 +190,7 @@ class PipelineConfig:
             entity_normalization=EntityNormalization(**data.get("entity_normalization", {})),
             graph_traversal=GraphTraversal(**data.get("graph_traversal", {})),
             judge_config=JudgeConfig(**data.get("judge_config", {})),
+            training_strategy_path=data.get("training_strategy_path"),
         )
     
     @classmethod
@@ -202,6 +205,7 @@ class PipelineConfig:
             entity_normalization=EntityNormalization(enable_synset_collapse=True),
             graph_traversal=GraphTraversal(confidence_threshold=0.5),
             judge_config=JudgeConfig(enable_judge=True),
+            training_strategy_path=None,
         )
 
 
@@ -215,6 +219,7 @@ TRAINING_ONLY_CONFIG = PipelineConfig(
     entity_normalization=EntityNormalization(),
     graph_traversal=GraphTraversal(),
     judge_config=JudgeConfig(enable_judge=False),
+    training_strategy_path=None,
 )
 
 INFERENCE_WITH_JUDGE_CONFIG = PipelineConfig(
@@ -225,6 +230,7 @@ INFERENCE_WITH_JUDGE_CONFIG = PipelineConfig(
     entity_normalization=EntityNormalization(),
     graph_traversal=GraphTraversal(),
     judge_config=JudgeConfig(enable_judge=True, judge_model="gpt-4"),
+    training_strategy_path=None,
 )
 
 GRAPH_RETRIEVAL_CONFIG = PipelineConfig(
@@ -235,4 +241,5 @@ GRAPH_RETRIEVAL_CONFIG = PipelineConfig(
     entity_normalization=EntityNormalization(enable_synset_collapse=True),
     graph_traversal=GraphTraversal(confidence_threshold=0.7),
     judge_config=JudgeConfig(enable_judge=False),
+    training_strategy_path=None,
 )

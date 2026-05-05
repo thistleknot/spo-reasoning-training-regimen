@@ -136,6 +136,121 @@ python -m src.build_training_regimens \
 
 The first builder keeps premise-level confidence. The second uses those confidence-bearing facts as input and emits `Throughline` plus an aggregate `Confidence` target.
 
+## Staged Multi-Regimen Curriculum
+
+The repo now has a first-class curriculum object in `src/training_strategy.py`. It makes the research conclusion explicit instead of leaving it as README advice.
+
+### Default stages
+
+1. **Base warm start**  
+   Train on `train_clean_for_model_967.jsonl` first so the adapter learns quote -> premises + throughline without frozen numeric targets.
+2. **Multi-task mix**  
+   Add the two confidence-bearing regimens with the base task still dominant.
+3. **Optional score refinement**  
+   Replace bootstrap synthetic scores later with judge labels, preference data, or GRPO if that becomes available.
+
+### Default initial mixture
+
+| Regimen | Weight |
+|---|---:|
+| Base reasoning | 0.60 |
+| Facts with confidence | 0.25 |
+| Syllogism with confidence | 0.15 |
+
+These are ablation starting points, not immutable truths.
+
+### Write the default strategy config
+
+```bash
+python -m src.training_strategy --output training_strategy.json
+```
+
+You can then point your higher-level pipeline config at that file through `PipelineConfig.training_strategy_path`.
+
+## Downstream Evaluation Contract
+
+The right question is not "did the model copy the synthetic score?" The right question is "did the confidence layer help us keep better syllogisms and reject worse ones?"
+
+The repo now includes `src/evaluate_regimens.py` for scored-holdout evaluation.
+
+### Expected scored holdout format
+
+Each JSONL row should contain at least:
+
+```json
+{"quote":"...", "predicted_confidence":0.82, "syllogism_quality":0.91}
+```
+
+Supported aliases:
+
+- `predicted_confidence` or `confidence`
+- `syllogism_quality` or `judge_score`
+
+### Metrics
+
+- Pearson and Spearman correlation between confidence and syllogism quality
+- AUROC for pass/fail acceptance
+- Brier score
+- Expected Calibration Error (ECE)
+- Risk-coverage curve for abstention or filtering
+
+### Run the evaluation harness
+
+```bash
+python -m src.evaluate_regimens \
+  --input eval/scored_holdout.jsonl \
+  --acceptance-threshold 0.7
+```
+
+Set the threshold to the minimum judge score you consider acceptable for a production syllogism.
+
+## Repairing and Rebuilding Canonical Corpora
+
+If the canonical `data/*.jsonl` corpora drift into a broken state, the repo now has a repair path in `src/rebuild_training_corpora.py`.
+
+That script merges:
+
+1. a confidence-bearing structured source for premises
+2. a conclusion-bearing legacy backup for throughlines
+
+and rewrites:
+
+- `data/train_structured_967.jsonl`
+- `data/train_clean_for_model_967.jsonl`
+- `data/train_facts_with_confidence_967.jsonl`
+- `data/train_syllogism_with_confidence_967.jsonl`
+
+Example:
+
+```bash
+python -m src.rebuild_training_corpora \
+  --confidence-source /tmp/gen-qwen3-qlora/output/train_preprocessed_structured_967.jsonl \
+  --conclusion-source /tmp/triplet-abductive-native-full-20250501/output/train.section-format.backup.jsonl
+```
+
+## Running the Ablation Matrix
+
+The repo now includes `src/run_ablation_matrix.py` to execute:
+
+1. `base-only`
+2. `base-plus-facts`
+3. `base-plus-facts-plus-syllogism`
+
+against the default curriculum.
+
+Example:
+
+```bash
+python -m src.run_ablation_matrix \
+  --output-dir output/ablations_run \
+  --holdout-fraction 0.1 \
+  --max-holdout-records 32
+```
+
+This writes per-experiment `results.json` files plus a top-level `ablation_summary.json`.
+It also writes `holdout_examples.md`, which shows the sampled holdout prompts,
+expected outputs, and each ablation's generated output side by side.
+
 ### Format Data for Training
 
 ```python

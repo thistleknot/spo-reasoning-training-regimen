@@ -34,7 +34,7 @@ Complete guide to example data and training artifacts.
 ### Production Training Data
 - **`train_clean_for_model_967.jsonl`** — 967 cleaned training records
   - Verified mojibake-free
-  - Pedagogical order (Non-Entailed → Entailed → Throughline)
+  - Input is quote only; output is pedagogical order (Non-Entailed → Entailed → Throughline)
   - Real training dataset used in prior sessions
 
 - **`train_facts_with_confidence_967.jsonl`** — 967 fact-confidence records
@@ -44,6 +44,10 @@ Complete guide to example data and training artifacts.
 - **`train_syllogism_with_confidence_967.jsonl`** — 967 syllogism-confidence records
   - Built from the same confidence-bearing synthetic corpus
   - Quote + facts → throughline + aggregate confidence
+
+- **`train_structured_967.jsonl`** — 967 merged structured records
+  - Canonical structured checkpoint used to regenerate the other three corpora
+  - Preserves quote, entailed premises, non-entailed premises, and throughline
 
 ## How to Use
 

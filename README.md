@@ -384,5 +384,33 @@ Apply downstream judging or calibration if you want numeric confidence later. Th
 
 ---
 
+## Lessons Learned
+
+Three compounding bugs caused the initial SPO training to produce worse output than the base adapter. Each one is subtle and worth documenting because they are easy to repeat in any RL-from-feedback setup.
+
+### 1. Greedy decoding without repetition controls loops forever
+
+`model.generate()` with `do_sample=False` and no `repetition_penalty` will lock onto any high-probability token sequence and repeat it indefinitely. The model is not broken — it is being perfectly greedy. A single repeated line scores just as well on format metrics as a unique one, so the problem is invisible to offline evaluation.
+
+**Fix:** Add `repetition_penalty=1.3` and `no_repeat_ngram_size=4` to every `generate()` call used in evaluation or inference. These two parameters eliminate exact-line repetition without degrading structured output format.
+
+### 2. Format-only reward metrics actively reinforce repetition
+
+The original SPO reward checked only the *presence* of `|...|...|` delimiters, a `confidence=` value, and an `observed`/`inferred` tag. A line repeated eight times passes all three checks eight times and earns a reward of 1.0. The reward function was measuring compliance with a template, not quality of reasoning.
+
+**Fix:** Add a uniqueness gate before any format check. If `unique_lines / total_lines < 0.5`, return 0.0 immediately. Also detect tautological triplets where the subject appears verbatim in the object field (e.g. `the speaker | is | is the speaker`) and deduct proportionally. Reward functions must penalise the failure modes they are meant to prevent, not just reward the happy path.
+
+### 3. Scoring gold outputs against gold ground truths yields uniform reward
+
+This is the most insidious bug. When `compute_step()` evaluates gold `output_texts` against gold `ground_truths`, every clean sample scores ~1.0. All training examples receive equal weight. SPO becomes plain SFT with extra steps and no signal. The training loss may look fine; avg_reward hovering at a flat ~0.8 is the only diagnostic clue.
+
+**Fix:** Pre-score each training sample *before* the training loop using data-quality signals that are independent of format compliance: unique-premises ratio, mean predicate specificity, and subject dominance ratio. Embed these scores as `precomputed_reward` in the training batch and use them in `compute_step()` instead of live evaluation. This separates reward differentiation (done offline at dataset construction time) from reward evaluation (which is inherently circular when gold data is both input and ground truth).
+
+### Takeaway
+
+For any RL-from-feedback training loop: (1) generation controls must prevent degenerate outputs before rewards are ever computed, (2) reward functions must explicitly penalise known failure modes rather than only rewarding the ideal case, and (3) reward signals computed from gold data are always suspect — check that the distribution of rewards across your training set actually varies before assuming SPO is doing anything useful.
+
+---
+
 **Status:** Production-ready  
 **Repository:** https://github.com/thistleknot/spo-reasoning-training-regimen

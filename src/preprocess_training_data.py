@@ -38,11 +38,20 @@ LEGACY_PROMPT_TAIL_MARKERS = (
     "Now generate the full analysis:",
 )
 
+SECTION_HEADER_MARKERS = (
+    "Non-Entailed Premises:",
+    "Entailed Premises:",
+    "Throughline:",
+    "Syllogism:",
+    "Conclusion:",
+)
+
 
 def parse_triplet_list(text: str) -> Optional[list[str]]:
     """Parse a bullet list of triplets.
 
     Returns None when the section is empty or explicitly marked as N/A.
+    Supports both bullet-prefixed and plain line-delimited triplet sections.
     """
     if not text or text.strip() == "N/A":
         return None
@@ -54,19 +63,37 @@ def parse_triplet_list(text: str) -> Optional[list[str]]:
             triplet = line[2:].strip()
             if triplet:
                 triplets.append(triplet)
+        elif "|" in line and not line.endswith(":"):
+            triplets.append(line)
 
     return triplets if triplets else None
 
 
+def find_line_start(text: str, marker: str, start: int = 0) -> int:
+    """Find a marker only when it begins a line."""
+    index = text.find(marker, start)
+    while index >= 0:
+        if index == 0 or text[index - 1] == "\n":
+            return index
+        index = text.find(marker, index + 1)
+    return -1
+
+
 def extract_section(text: str, header: str) -> str:
     """Extract section content between a markdown header and the next header."""
-    full_header = f"**{header}**"
-    header_start = text.find(full_header)
-    if header_start < 0:
-        full_header = f"**{header}"
-        header_start = text.find(full_header)
-    if header_start < 0:
+    header_variants = (
+        f"**{header}**",
+        f"**{header}",
+        f"{header}:",
+    )
+    matches = [
+        (variant, find_line_start(text, variant))
+        for variant in header_variants
+        if find_line_start(text, variant) >= 0
+    ]
+    if not matches:
         return ""
+    full_header, header_start = min(matches, key=lambda item: item[1])
 
     content_start = text.find("\n", header_start)
     if content_start < 0:
@@ -74,10 +101,15 @@ def extract_section(text: str, header: str) -> str:
     content_start += 1
 
     next_header = len(text)
-    for pos in range(content_start, len(text) - 1):
-        if text[pos : pos + 2] == "**":
-            next_header = pos
-            break
+    next_header_matches = [
+        idx for marker in SECTION_HEADER_MARKERS
+        if marker != f"{header}:" and (idx := find_line_start(text, marker, content_start)) >= 0
+    ]
+    markdown_header = find_line_start(text, "**", content_start)
+    if markdown_header >= 0:
+        next_header_matches.append(markdown_header)
+    if next_header_matches:
+        next_header = min(next_header_matches)
 
     return text[content_start:next_header].strip()
 
@@ -106,6 +138,7 @@ def extract_quote(text: str) -> str:
 
     quote_text = _split_at_first_marker(quote_text, LEGACY_CANDIDATE_MARKERS)
     quote_text = _split_at_first_marker(quote_text, LEGACY_PROMPT_TAIL_MARKERS)
+    quote_text = _split_at_first_marker(quote_text, SECTION_HEADER_MARKERS)
     quote_text = _split_at_first_marker(quote_text, ("**",))
 
     quote_text = re.sub(r"^Quote:\s*", "", quote_text).strip()
@@ -145,7 +178,9 @@ def preprocess_training_record(record: dict) -> dict:
     non_entailed_section = extract_section(output_text, "Non-Entailed Premises")
     non_entailed_premises = parse_triplet_list(non_entailed_section)
 
-    syllogism_section = extract_section(output_text, "Conclusion")
+    syllogism_section = extract_section(output_text, "Throughline")
+    if not syllogism_section:
+        syllogism_section = extract_section(output_text, "Conclusion")
     if not syllogism_section:
         syllogism_section = extract_section(output_text, "Syllogism")
 

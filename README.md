@@ -8,6 +8,7 @@ This repo packages the full workflow for turning raw quotes into structured reas
 
 - Synthetic reasoning dataset generation from quotes
 - A format contract that separates generation order from training order
+- Three complementary training regimens built from the same synthetic base
 - QLoRA training guidance for small-to-mid-size reasoning models
 - Optional downstream judging or calibration after the base reasoning model is trained
 - "Seeing is believing" example artifacts under `data/`
@@ -128,6 +129,32 @@ Throughline:
 When one feels a premonition or intuitive sense, something bad is approaching.
 ```
 
+## Training regimen families
+
+The repo now supports three adjacent supervised tasks over the same synthetic source data:
+
+| Regimen | Input | Output | Numeric confidence |
+|---|---|---|---|
+| Base reasoning | Quote | Non-entailed + entailed premises + throughline | Stripped |
+| Facts with confidence | Quote | Non-entailed + entailed premises | Preserved |
+| Syllogism with confidence | Quote + confidence-bearing facts | Throughline + aggregate confidence | Preserved |
+
+The first regimen teaches the reasoning structure cleanly. The other two turn the original synthetic numerics into follow-on tasks instead of freezing them into the base target.
+
+You can build the two follow-on datasets with:
+
+```bash
+python -m src.build_training_regimens \
+  --input path/to/confidence_rich_source.jsonl \
+  --output data/train_facts_with_confidence.jsonl \
+  --regimen facts_with_confidence
+
+python -m src.build_training_regimens \
+  --input path/to/confidence_rich_source.jsonl \
+  --output data/train_syllogism_with_confidence.jsonl \
+  --regimen syllogism_with_confidence
+```
+
 ## Why the format matters
 
 The core design choice is that the repo uses different orders for different stages of the pipeline.
@@ -183,6 +210,7 @@ One of the prior pain points was making generation-model and inference-model set
 spo-reasoning-training-regimen/
 ├── src/
 │   ├── synthetic_generator.py
+│   ├── build_training_regimens.py
 │   ├── spo_trainer.py
 │   ├── pipeline.py
 │   ├── training_config.py
@@ -198,8 +226,12 @@ spo-reasoning-training-regimen/
 └── data/
     ├── sample_quotes.txt
     ├── examples_training_format.jsonl
+    ├── examples_facts_with_confidence.jsonl
+    ├── examples_syllogism_with_confidence.jsonl
     ├── SEEING_IS_BELIEVING_EXAMPLES.md
-    └── train_clean_for_model_967.jsonl
+    ├── train_clean_for_model_967.jsonl
+    ├── train_facts_with_confidence_967.jsonl
+    └── train_syllogism_with_confidence_967.jsonl
 ```
 
 ## Seeing-is-believing artifacts
@@ -210,8 +242,12 @@ If you want to inspect the output shape before generating anything, start here:
 |---|---|
 | `data/SEEING_IS_BELIEVING_EXAMPLES.md` | Human-readable examples of quote -> structured reasoning |
 | `data/examples_training_format.jsonl` | The same examples in training-ready JSONL |
+| `data/examples_facts_with_confidence.jsonl` | Example follow-on task for premise scoring |
+| `data/examples_syllogism_with_confidence.jsonl` | Example follow-on task for throughline scoring |
 | `data/sample_quotes.txt` | Easy starter input set |
 | `data/train_clean_for_model_967.jsonl` | Larger cleaned training corpus used in prior work |
+| `data/train_facts_with_confidence_967.jsonl` | Follow-on fact-confidence regimen |
+| `data/train_syllogism_with_confidence_967.jsonl` | Follow-on syllogism-confidence regimen |
 
 ## Documentation guide
 

@@ -19,6 +19,11 @@ from .pipeline import (
     PipelineConfig,
 )
 
+from .build_training_regimens import (
+    TrainingRegimen,
+    build_training_regimen_dataset,
+)
+
 __all__ = [
     "SyntheticReasoningGenerator",
     "ReasoningExample",
@@ -28,4 +33,6 @@ __all__ = [
     "SPOReward",
     "Pipeline",
     "PipelineConfig",
+    "TrainingRegimen",
+    "build_training_regimen_dataset",
 ]

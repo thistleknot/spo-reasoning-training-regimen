@@ -21,11 +21,29 @@ Complete guide to example data and training artifacts.
   - Format: `{"input_text": "...", "output_text": "..."}`
   - Compatible with transformers and QLoRA
 
+- **`examples_facts_with_confidence.jsonl`** — 5 example rows for fact scoring
+  - Quote-only prompt
+  - Output preserves premise confidence
+  - Useful as a follow-on multi-task regimen
+
+- **`examples_syllogism_with_confidence.jsonl`** — 5 example rows for argument scoring
+  - Input includes quote + confidence-bearing facts
+  - Output is throughline + aggregate confidence
+  - Useful for downstream reasoning-score supervision
+
 ### Production Training Data
 - **`train_clean_for_model_967.jsonl`** — 967 cleaned training records
   - Verified mojibake-free
   - Pedagogical order (Non-Entailed → Entailed → Throughline)
   - Real training dataset used in prior sessions
+
+- **`train_facts_with_confidence_967.jsonl`** — 967 fact-confidence records
+  - Built from the prior confidence-bearing synthetic corpus
+  - Quote → premise extraction with preserved confidence
+
+- **`train_syllogism_with_confidence_967.jsonl`** — 967 syllogism-confidence records
+  - Built from the same confidence-bearing synthetic corpus
+  - Quote + facts → throughline + aggregate confidence
 
 ## How to Use
 
@@ -131,7 +149,11 @@ This is reversible and enables:
 |------|---------|--------|---------|
 | `sample_quotes.txt` | 10 | Plain text | Quick testing |
 | `examples_training_format.jsonl` | 5 | JSONL | Demonstration |
+| `examples_facts_with_confidence.jsonl` | 5 | JSONL | Follow-on premise scoring |
+| `examples_syllogism_with_confidence.jsonl` | 5 | JSONL | Follow-on throughline scoring |
 | `train_clean_for_model_967.jsonl` | 967 | JSONL | Production training |
+| `train_facts_with_confidence_967.jsonl` | 967 | JSONL | Follow-on premise scoring |
+| `train_syllogism_with_confidence_967.jsonl` | 967 | JSONL | Follow-on throughline scoring |
 
 ## See Also
 

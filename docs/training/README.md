@@ -112,6 +112,30 @@ tokenizer.save_pretrained("./adapter")
 
 ## Data Preparation
 
+This repo now has three adjacent dataset families:
+
+1. `train_clean_for_model_967.jsonl` — base reasoning target with no numeric confidence
+2. `train_facts_with_confidence_967.jsonl` — quote -> premises with confidence
+3. `train_syllogism_with_confidence_967.jsonl` — quote + confidence-bearing facts -> throughline + confidence
+
+Use the first regimen to teach reasoning structure. Use the other two as follow-on multi-task or staged fine-tuning datasets.
+
+### Build the Follow-On Regimens
+
+```bash
+python -m src.build_training_regimens \
+  --input path/to/confidence_rich_source.jsonl \
+  --output data/train_facts_with_confidence.jsonl \
+  --regimen facts_with_confidence
+
+python -m src.build_training_regimens \
+  --input path/to/confidence_rich_source.jsonl \
+  --output data/train_syllogism_with_confidence.jsonl \
+  --regimen syllogism_with_confidence
+```
+
+The first builder keeps premise-level confidence. The second uses those confidence-bearing facts as input and emits `Throughline` plus an aggregate `Confidence` target.
+
 ### Format Data for Training
 
 ```python

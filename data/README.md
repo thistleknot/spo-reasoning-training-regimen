@@ -13,7 +13,7 @@ Complete guide to example data and training artifacts.
 - **`SEEING_IS_BELIEVING_EXAMPLES.md`** — 5 complete end-to-end examples
   - Shows input quotes and full model output
   - Formatted with pedagogical order (Non-Entailed → Entailed → Throughline)
-  - Includes confidence scores and evidence tags
+  - Uses evidence tags without frozen numeric confidence
   - Demonstrates reasoning quality and format
 
 - **`examples_training_format.jsonl`** — Same 5 examples in JSONL format
@@ -89,10 +89,10 @@ Each example has:
      [synthesized reasoning/conclusion]
    ```
 
-3. **Evidence Tags**: `(observed|inferred, confidence=X)`
-   - `observed` = explicit in text (typically 1.0)
-   - `inferred` = derived from text (0.3-0.95)
-   - Confidence = model's uncertainty estimate
+3. **Evidence Tags**: `(observed|inferred)`
+   - `observed` = explicit in text
+   - `inferred` = derived from text
+   - Numeric confidence is assigned later if needed
 
 ## Data Format Details
 
@@ -107,16 +107,16 @@ Non-Entailed first because:
 
 - NOT confidence scores in training data
 - Model learns to distinguish observed vs inferred
-- Confidence emerges at inference time
-- SPO optimizes confidence via downstream rewards
+- Numeric confidence is not baked into the supervised target
+- Any later confidence can come from a judge or calibration layer
 
 ### Triplet Format
 
-Each premise is: `subject | relation (tag, confidence=X) | object`
+Each training premise is: `subject | relation (tag) | object`
 
 Example:
 ```
-something | is (inferred, confidence=0.85) | wicked
+something | is (inferred) | wicked
 ```
 
 This is reversible and enables:
@@ -145,4 +145,4 @@ This is reversible and enables:
 1. **Try the examples** — Load and inspect `examples_training_format.jsonl`
 2. **Generate your own** — Use `sample_quotes.txt` with pipeline
 3. **Train a model** — Feed generated JSONL to QLoRA
-4. **Optimize confidence** — Use SPOTrainer for calibration
+4. **Add scores later if needed** — Use an external judge or calibration layer

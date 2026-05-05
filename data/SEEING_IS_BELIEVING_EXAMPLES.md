@@ -12,13 +12,13 @@ Input:
 Completion:
 ```
 Non-Entailed Premises:
-  thumbs | are (observed, confidence=1.0) | pricking
-  thumbs | are (inferred, confidence=0.3) | numb
+  thumbs | are (observed) | pricking
+  thumbs | are (inferred) | numb
 
 Entailed Premises:
-  something | is (inferred, confidence=0.85) | wicked
-  something | is (inferred, confidence=0.88) | coming
-  premonition | indicates (inferred, confidence=0.9) | danger
+  something | is (inferred) | wicked
+  something | is (inferred) | coming
+  premonition | indicates (inferred) | danger
 
 Throughline:
   When one feels a premonition through physical sensation (pricking thumbs), something wicked or dangerous approaches.
@@ -36,13 +36,13 @@ Input:
 Completion:
 ```
 Non-Entailed Premises:
-  semicolons | represent (inferred, confidence=0.2) | hermaphrodites
-  writing | uses (inferred, confidence=0.4) | transvestite concepts
+  semicolons | represent (inferred) | hermaphrodites
+  writing | uses (inferred) | transvestite concepts
 
 Entailed Premises:
-  semicolons | are (observed, confidence=1.0) | punctuation
-  semicolons | should be (inferred, confidence=0.8) | avoided in creative writing
-  clear writing | requires (inferred, confidence=0.75) | simpler punctuation
+  semicolons | are (observed) | punctuation
+  semicolons | should be (inferred) | avoided in creative writing
+  clear writing | requires (inferred) | simpler punctuation
 
 Throughline:
   Effective creative writing avoids complex punctuation like semicolons in favor of simpler, clearer syntax.
@@ -60,13 +60,13 @@ Input:
 Completion:
 ```
 Non-Entailed Premises:
-  equality | is (inferred, confidence=0.3) | absolute
+  equality | is (inferred) | absolute
 
 Entailed Premises:
-  animals | are (observed, confidence=1.0) | equal (in principle)
-  some animals | are (inferred, confidence=0.95) | more privileged
-  hierarchy | exists (inferred, confidence=0.9) | despite stated equality
-  power | determines (inferred, confidence=0.85) | actual equality
+  animals | are (observed) | equal (in principle)
+  some animals | are (inferred) | more privileged
+  hierarchy | exists (inferred) | despite stated equality
+  power | determines (inferred) | actual equality
 
 Throughline:
   Stated equality may mask actual hierarchies where those in power enjoy privileges not shared by others.
@@ -84,13 +84,13 @@ Input:
 Completion:
 ```
 Non-Entailed Premises:
-  times | are (inferred, confidence=0.2) | neutral
+  times | are (inferred) | neutral
 
 Entailed Premises:
-  period | contains (inferred, confidence=0.8) | contradictions
-  times | are (observed, confidence=1.0) | best AND worst simultaneously
-  perspective | affects (inferred, confidence=0.85) | perception of era
-  change | brings (inferred, confidence=0.9) | both loss and opportunity
+  period | contains (inferred) | contradictions
+  times | are (observed) | best AND worst simultaneously
+  perspective | affects (inferred) | perception of era
+  change | brings (inferred) | both loss and opportunity
 
 Throughline:
   Historical periods contain simultaneous progress and suffering; whether an era is "best" or "worst" depends on one's position and perspective.
@@ -108,13 +108,13 @@ Input:
 Completion:
 ```
 Non-Entailed Premises:
-  hero | is (inferred, confidence=0.4) | predetermined
+  hero | is (inferred) | predetermined
 
 Entailed Premises:
-  protagonist | will (observed, confidence=1.0) | be revealed through narrative
-  identity | emerges (inferred, confidence=0.9) | through action and choice
-  heroism | depends (inferred, confidence=0.85) | on decisions made
-  self | is (inferred, confidence=0.8) | constructed through lived experience
+  protagonist | will (observed) | be revealed through narrative
+  identity | emerges (inferred) | through action and choice
+  heroism | depends (inferred) | on decisions made
+  self | is (inferred) | constructed through lived experience
 
 Throughline:
   A person becomes the hero of their own story through the choices they make and the narrative they create by living.
@@ -138,13 +138,12 @@ Throughline:
    - What the model generates from premises
 
 ### Evidence Tags
-- **observed**: Explicit in the text (confidence typically 1.0)
-- **inferred**: Derived from the text (confidence 0.3-0.95)
+- **observed**: Explicit in the text
+- **inferred**: Derived from the text
 
 ### Confidence Scores
-- Model assigns these during inference
-- SPO training optimizes: reward = correctness × confidence
-- Higher confidence on correct inferences → calibrated model
+- Not part of the base training target
+- Can be assigned later by an external judge or calibration layer
 
 ---
 
@@ -155,7 +154,7 @@ These examples serialize to training JSONL like:
 ```json
 {
   "input_text": "\"By the pricking of my thumbs, Something wicked this way comes.\"",
-  "output_text": "Non-Entailed Premises:\n  thumbs | are (observed, confidence=1.0) | pricking\n  thumbs | are (inferred, confidence=0.3) | numb\n\nEntailed Premises:\n  something | is (inferred, confidence=0.85) | wicked\n  something | is (inferred, confidence=0.88) | coming\n  premonition | indicates (inferred, confidence=0.9) | danger\n\nThroughline:\n  When one feels a premonition through physical sensation (pricking thumbs), something wicked or dangerous approaches."
+  "output_text": "Non-Entailed Premises:\n  thumbs | are (observed) | pricking\n  thumbs | are (inferred) | numb\n\nEntailed Premises:\n  something | is (inferred) | wicked\n  something | is (inferred) | coming\n  premonition | indicates (inferred) | danger\n\nThroughline:\n  When one feels a premonition through physical sensation (pricking thumbs), something wicked or dangerous approaches."
 }
 ```
 
@@ -185,7 +184,7 @@ gen.export_to_jsonl("data/train.jsonl")
 ## Key Insights from Examples
 
 1. **Negative inference matters** — Non-entailed premises teach what's irrelevant
-2. **Confidence calibration** — Higher confidence on "more certain" inferences
+2. **Confidence stays permeable** — numeric scores can be assigned later without freezing them into labels
 3. **Syllogism synthesis** — Throughline connects premises into coherent reasoning
 4. **Evidence tags guide learning** — Model learns observed vs inferred distinction
 5. **Pedagogical order helps convergence** — Non-entailed first teaches discrimination

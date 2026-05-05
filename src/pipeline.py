@@ -37,7 +37,7 @@ class PipelineConfig:
 
     # Training format
     use_contrastive_input: bool = True
-    include_confidence: bool = True
+    include_confidence: bool = False
     pedagogical_order: bool = True  # Non-Entailed → Entailed → Throughline
 
     # QLoRA training
@@ -105,7 +105,10 @@ class Pipeline:
 
         # Export to JSONL for training
         output_path = self.config.synthetic_output
-        self.generator.export_to_jsonl(str(output_path))
+        self.generator.export_to_jsonl(
+            str(output_path),
+            include_confidence=self.config.include_confidence,
+        )
         logger.info(f"Exported {len(examples)} examples to {output_path}")
 
         # Show statistics
@@ -180,7 +183,10 @@ class Pipeline:
         """
         # Reuse the generator's export method
         self.generator.examples = examples
-        self.generator.export_to_jsonl(str(output_path))
+        self.generator.export_to_jsonl(
+            str(output_path),
+            include_confidence=self.config.include_confidence,
+        )
         logger.info(f"Exported training data to {output_path}")
 
     def generate_validation_report(
@@ -207,11 +213,17 @@ class Pipeline:
             else:
                 # Generate expected output
                 non_entailed_str = "\n".join(
-                    f"  {p.subject} | {p.relation} ({p.tag}, confidence={p.confidence}) | {p.object_}"
+                    self.generator._format_triplet(
+                        p,
+                        include_confidence=self.config.include_confidence,
+                    )
                     for p in example.non_entailed_premises
                 )
                 entailed_str = "\n".join(
-                    f"  {p.subject} | {p.relation} ({p.tag}, confidence={p.confidence}) | {p.object_}"
+                    self.generator._format_triplet(
+                        p,
+                        include_confidence=self.config.include_confidence,
+                    )
                     for p in example.entailed_premises
                 )
 

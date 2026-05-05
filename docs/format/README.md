@@ -4,7 +4,7 @@ Complete specification for the SPO reasoning training format.
 
 ## Overview
 
-The training format encodes semantic reasoning as structured triplets (subject-relation-object) with evidence tags and confidence scores. This enables:
+The repo uses structured triplets (subject-relation-object) throughout, but only generation-time records need numeric confidence. Training rows keep the evidence tags and drop static scores. This enables:
 - **Non-Entailed Premises** — Premises that don't support the conclusion
 - **Entailed Premises** — Premises that logically support the conclusion
 - **Throughline** — The abductive hypothesis connecting premises to conclusion
@@ -23,8 +23,8 @@ graph TB
     G --> H["Trained Model"]
     H --> I["Inference on Quote"]
     I -->|"Output in Pedagogical Order<br/>inherited from training"| J["Non-Entailed → Entailed → Throughline"]
-    J --> K["Extract Confidence<br/>confidence=X.XX"]
-    K --> L["SPO Optimization<br/>Reward = correctness × confidence"]
+    J --> K["Optional judge / calibrator<br/>assigns scores later"]
+    K --> L["Downstream optimization<br/>if you want numeric confidence"]
 ```
 
 ## Three Stages: Generation vs Training vs Inference
@@ -89,13 +89,13 @@ Non Entailed Premises:
 **Pedagogical Format** (Negative Examples First):
 ```
 Non Entailed Premises:
-  - thumbs | are (observed, confidence=1.0) | pricking
-  - sensation | causes (inferred, confidence=0.4) | physical pain
+  - thumbs | are (observed) | pricking
+  - sensation | causes (inferred) | physical pain
 
 Entailed Premises:
-  - something | is (inferred, confidence=0.75) | wicked
-  - something | is (inferred, confidence=0.8) | coming
-  - premonition | signals (observed, confidence=1.0) | danger
+  - something | is (inferred) | wicked
+  - something | is (inferred) | coming
+  - premonition | signals (observed) | danger
 
 Throughline:
   When one feels a premonition or intuitive sense, something bad is approaching.
@@ -105,7 +105,7 @@ Throughline:
 ```json
 {
   "input_text": "By the pricking of my thumbs, Something wicked this way comes.",
-  "output_text": "Non Entailed Premises:\n  - thumbs | are (observed, confidence=1.0) | pricking\n  - sensation | causes (inferred, confidence=0.4) | physical pain\n\nEntailed Premises:\n  - something | is (inferred, confidence=0.75) | wicked\n  - something | is (inferred, confidence=0.8) | coming\n  - premonition | signals (observed, confidence=1.0) | danger\n\nThroughline:\n  When one feels a premonition or intuitive sense, something bad is approaching."
+  "output_text": "Non Entailed Premises:\n  - thumbs | are (observed) | pricking\n  - sensation | causes (inferred) | physical pain\n\nEntailed Premises:\n  - something | is (inferred) | wicked\n  - something | is (inferred) | coming\n  - premonition | signals (observed) | danger\n\nThroughline:\n  When one feels a premonition or intuitive sense, something bad is approaching."
 }
 ```
 
@@ -126,13 +126,13 @@ Input:
 Completion: (model outputs in learned pedagogical order)
 ```
 Non Entailed Premises:
-  - Ishmael | is (inferred, confidence=0.3) | fictional character
-  - sailor | is (inferred, confidence=0.4) | wealthy
+  - Ishmael | is (inferred) | fictional character
+  - sailor | is (inferred) | wealthy
 
 Entailed Premises:
-  - person | is (observed, confidence=1.0) | narrator
-  - narrator | has (inferred, confidence=0.85) | maritime experience
-  - maritime experience | implies (inferred, confidence=0.8) | sea knowledge
+  - person | is (observed) | narrator
+  - narrator | has (inferred) | maritime experience
+  - maritime experience | implies (inferred) | sea knowledge
 
 Throughline:
   The narrator is establishing their identity as someone with extensive maritime knowledge and seafaring experience.
@@ -141,16 +141,22 @@ Throughline:
 
 **Key Point:** Model outputs in pedagogical order (learned during training) — **NOT** generation order
 
-**Confidence Extraction:**
-- Regex pattern: `confidence=([0-9.]+)`
-- Extract all confidence scores
-- Used for SPO reward calculation: `reward = correctness × average_confidence`
+**Post-hoc Scoring:**
+- The base model emits premises + throughline without numeric confidence.
+- If you want scores later, run an external judge or calibrator on the generated text.
+- This keeps confidence permeable instead of freezing synthetic numerics into SFT labels.
 
 ## Triplet Structure
 
 ### Format
+Generation-time structured records may use:
 ```
 subject | relation (evidence_tag, confidence=X.XX) | object
+```
+
+Training and base inference use:
+```
+subject | relation (evidence_tag) | object
 ```
 
 ### Components
@@ -174,11 +180,9 @@ subject | relation (evidence_tag, confidence=X.XX) | object
   - Example: `something | is (inferred, confidence=0.85) | wicked`
 
 **Confidence Score**
-- 1.0 = Certain (observed in text)
-- 0.9 = Very likely (strong inference)
-- 0.7-0.8 = Probable (reasonable inference)
-- 0.5-0.6 = Weak (speculative)
-- 0.3-0.4 = Unlikely (negative example for training)
+- Useful as an audit or judge-side field during synthetic generation
+- Not part of the base training target
+- Better treated as downstream metadata than as a static supervised label
 
 ## Pydantic Schema
 

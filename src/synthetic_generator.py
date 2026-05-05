@@ -144,10 +144,20 @@ class SyntheticReasoningGenerator:
             # Fall back to template
             return self._create_template_example(quote)
 
-    def export_to_jsonl(self, path: str):
+    def _format_triplet(self, triplet: TripletItem, include_confidence: bool) -> str:
+        """Serialize a triplet for training or inspection output."""
+        if include_confidence:
+            return (
+                f"  {triplet.subject} | {triplet.relation} "
+                f"({triplet.tag}, confidence={triplet.confidence}) | {triplet.object_}"
+            )
+        return f"  {triplet.subject} | {triplet.relation} ({triplet.tag}) | {triplet.object_}"
+
+    def export_to_jsonl(self, path: str, include_confidence: bool = False):
         """Export examples to JSONL format for training.
 
-        Format: input_text (quote + premises) + output_text (completion with premises + syllogism)
+        Numeric confidence is stripped by default so the training target remains
+        text-first and downstream scoring stays permeable.
         """
         with open(path, "w") as f:
             for example in self.examples:
@@ -156,11 +166,11 @@ class SyntheticReasoningGenerator:
 
                 # Output: pedagogical format (Non-Entailed → Entailed → Syllogism)
                 non_entailed_str = "\n".join(
-                    f"  {p.subject} | {p.relation} ({p.tag}, confidence={p.confidence}) | {p.object_}"
+                    self._format_triplet(p, include_confidence=include_confidence)
                     for p in example.non_entailed_premises
                 )
                 entailed_str = "\n".join(
-                    f"  {p.subject} | {p.relation} ({p.tag}, confidence={p.confidence}) | {p.object_}"
+                    self._format_triplet(p, include_confidence=include_confidence)
                     for p in example.entailed_premises
                 )
 

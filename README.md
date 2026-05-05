@@ -1,6 +1,6 @@
 # SPO Reasoning Training Regimen
 
-Build quote -> structured reasoning dataset -> QLoRA adapter -> confidence-calibrated reasoning model.
+Build quote -> structured reasoning dataset -> QLoRA adapter -> optional downstream confidence calibration.
 
 This repo packages the full workflow for turning raw quotes into structured reasoning examples, training a model to emit that reasoning in a pedagogical order, and optionally calibrating confidence with Soft Policy Optimization (SPO). The root README is the front door; the deeper mechanics live in the docs folders linked below.
 
@@ -9,7 +9,7 @@ This repo packages the full workflow for turning raw quotes into structured reas
 - Synthetic reasoning dataset generation from quotes
 - A format contract that separates generation order from training order
 - QLoRA training guidance for small-to-mid-size reasoning models
-- Optional SPO calibration where `reward = correctness x confidence`
+- Optional downstream judging or calibration after the base reasoning model is trained
 - "Seeing is believing" example artifacts under `data/`
 
 ## Workflow at a glance
@@ -112,17 +112,17 @@ The preprocessing step strips hybrid markdown wrappers, extracts named sections,
 
 ### 3. Training row actually fed to the model
 
-The serializer then converts that structured record into the pedagogical training format used for QLoRA:
+The serializer then converts that structured record into the pedagogical training format used for QLoRA. Evidence tags stay; numeric confidence is stripped so the base model learns premises and throughline text rather than frozen scores:
 
 ```text
 "By the pricking of my thumbs, Something wicked this way comes."
 
 Non-Entailed Premises:
-thumbs | are (observed, confidence=1.0) | pricking
+thumbs | are (observed) | pricking
 
 Entailed Premises:
-something | is (inferred, confidence=0.75) | wicked
-something | is (inferred, confidence=0.8) | coming
+something | is (inferred) | wicked
+something | is (inferred) | coming
 
 Throughline:
 When one feels a premonition or intuitive sense, something bad is approaching.
@@ -153,9 +153,10 @@ The repo's filtering/cleaning path is conservative and explicit rather than magi
    - Empty or explicit `N/A` sections become `None` in the structured record
    - Missing markdown wrappers are handled by the section extractor when possible
 3. **Preserve reasoning signal**
-   - Triplets stay intact
-   - Evidence tags and confidence annotations are preserved
-   - The cleaned corpus keeps the mojibake-fixed records in `data/train_clean_for_model_967.jsonl`
+    - Triplets stay intact
+    - Evidence tags are preserved
+    - Numeric confidence can remain in structured synthetic records for audit, but it is stripped from training rows so downstream judges can assign scores later
+    - The cleaned corpus in `data/train_clean_for_model_967.jsonl` reflects the confidence-free training target
 4. **Drop malformed rows at preprocessing time**
    - If a line fails JSON parsing or record conversion, it increments the preprocessing error count and is not written to the cleaned output
 5. **Serialize survivors into training format**
@@ -163,7 +164,7 @@ The repo's filtering/cleaning path is conservative and explicit rather than magi
      `Non-Entailed Premises -> Entailed Premises -> Throughline`
    - Empty sections are written back out as explicit `N/A`
 
-In other words, the repo is not training directly on whatever the generator spit out. It parses, normalizes, preserves the reasoning metadata, and only then serializes the clean training rows.
+In other words, the repo is not training directly on whatever the generator spit out. It parses, normalizes, preserves the reasoning structure, and only then serializes clean training rows without static numeric confidence labels.
 
 ## Model configuration: where it lives
 
@@ -174,7 +175,7 @@ One of the prior pain points was making generation-model and inference-model set
 | Configure an LLM to generate synthetic data | `docs/generation/README.md` |
 | Load a fine-tuned adapter or set inference parameters | `docs/inference/README.md` |
 | Configure QLoRA training knobs | `docs/training/README.md` |
-| Understand why confidence is emergent instead of trained as a label | `docs/architecture/README.md` |
+| Understand why confidence should stay downstream of the base training target | `docs/architecture/README.md` |
 
 ## Repo map
 
@@ -236,7 +237,7 @@ Take the validated JSONL and fine-tune a base model so it learns the pedagogical
 
 ### Phase 3: Optimize
 
-Apply SPO if you want the model's confidence scores to be calibrated rather than decorative. The objective is simple: reward correct answers more when the model is confidently right, and do not reward confident wrong answers.
+Apply downstream judging or calibration if you want numeric confidence later. The base model should first learn to emit the right premises and throughline; any scores can be assigned post hoc by a judge or calibration layer.
 
 ## Hardware by phase
 

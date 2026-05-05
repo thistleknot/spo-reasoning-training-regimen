@@ -2,42 +2,69 @@
 Adapter: Convert preprocessed structured data to training format.
 
 Takes clean structured dicts (quote, entailed_premises, non_entailed_premises,
-syllogism) and serializes them to input_text/output_text format suitable for training.
-
-This format is CLEAN (no markdown markers, only data).
+syllogism) and serializes them to input_text/output_text format suitable for
+training. Numeric confidence is stripped by default so the training target
+teaches premise structure and throughline text, while downstream judges or
+calibrators remain free to assign scores later.
 """
 
 import json
+import re
 from typing import Optional
 
 
-def triplets_to_text(triplets: Optional[list[str]]) -> str:
-    """Convert list of triplets to text format for training.
-    
-    Returns clean text without markdown markers.
+CONFIDENCE_ANNOTATION_RE = re.compile(
+    r"\((observed|inferred)\s*,\s*confidence\s*[:=]\s*[^)]+\)"
+)
+
+
+def strip_confidence_annotation(triplet: str) -> str:
+    """Remove numeric confidence while preserving the evidence tag.
+
+    Preconditions:
+        triplet follows the repo's serialized premise shape when confidence is
+        present: ``subject | relation (tag, confidence=X) | object``.
+    Failure modes:
+        If no confidence annotation is present, the original triplet is returned
+        unchanged.
     """
+    return CONFIDENCE_ANNOTATION_RE.sub(r"(\1)", triplet)
+
+
+def triplets_to_text(
+    triplets: Optional[list[str]],
+    include_confidence: bool = False,
+) -> str:
+    """Convert a list of triplets to text format for training."""
     if not triplets:
         return "N/A"
-    
+
     lines = []
     for triplet in triplets:
-        lines.append(triplet)
-    
+        if include_confidence:
+            lines.append(triplet)
+        else:
+            lines.append(strip_confidence_annotation(triplet))
+
     return "\n".join(lines)
 
 
-def serialize_training_record(structured_record: dict) -> dict:
+def serialize_training_record(
+    structured_record: dict,
+    include_confidence: bool = False,
+) -> dict:
     """Convert structured record to input_text/output_text format for training.
-    
+
     Training format uses pedagogical ordering:
     - Non-Entailed Premises FIRST (teaches negative inference)
     - Entailed Premises second (teaches positive inference)
     - Throughline last (the conclusion)
-    
+
     Args:
         structured_record: {quote, entailed_premises, non_entailed_premises,
                            throughline}
-    
+        include_confidence: Preserve numeric confidence in serialized triplets.
+
     Returns:
         {input_text, output_text} for trainer
     """
@@ -53,10 +80,10 @@ def serialize_training_record(structured_record: dict) -> dict:
         f'"{quote}"',
         "",
         "Non-Entailed Premises:",
-        triplets_to_text(non_entailed),
+        triplets_to_text(non_entailed, include_confidence=include_confidence),
         "",
         "Entailed Premises:",
-        triplets_to_text(entailed),
+        triplets_to_text(entailed, include_confidence=include_confidence),
         "",
         "Throughline:",
         throughline or "N/A",
@@ -72,13 +99,18 @@ def serialize_training_record(structured_record: dict) -> dict:
     }
 
 
-def convert_preprocessed_to_training(input_file: str, output_file: str) -> dict:
+def convert_preprocessed_to_training(
+    input_file: str,
+    output_file: str,
+    include_confidence: bool = False,
+) -> dict:
     """Convert preprocessed structured JSONL to training format JSONL.
-    
+
     Args:
         input_file: Preprocessed structured JSONL
         output_file: Training format JSONL
-    
+        include_confidence: Preserve numeric confidence in training rows.
+
     Returns:
         Statistics dict
     """
@@ -95,7 +127,10 @@ def convert_preprocessed_to_training(input_file: str, output_file: str) -> dict:
                 stats["total"] += 1
                 
                 # Convert to training format
-                training_record = serialize_training_record(structured)
+                training_record = serialize_training_record(
+                    structured,
+                    include_confidence=include_confidence,
+                )
                 
                 outfile.write(json.dumps(training_record) + "\n")
                 stats["converted"] += 1
@@ -118,10 +153,19 @@ if __name__ == "__main__":
     )
     parser.add_argument("--input", required=True, help="Preprocessed structured JSONL")
     parser.add_argument("--output", required=True, help="Training format JSONL")
+    parser.add_argument(
+        "--include-confidence",
+        action="store_true",
+        help="Keep numeric confidence annotations in the serialized training rows",
+    )
     
     args = parser.parse_args()
     
-    stats = convert_preprocessed_to_training(args.input, args.output)
+    stats = convert_preprocessed_to_training(
+        args.input,
+        args.output,
+        include_confidence=args.include_confidence,
+    )
     
     print("\n=== CONVERSION STATISTICS ===")
     print(f"Total: {stats['total']}")

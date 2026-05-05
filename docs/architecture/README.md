@@ -2,22 +2,22 @@
 
 High-level architecture and the reasoning behind key design decisions.
 
-## The Core Insight: Confidence is Emergent
+## The Core Insight: Confidence Should Stay Downstream
 
 **Problem:** Traditional approaches fail at confidence calibration
 - If you train models with confidence labels, they overfit to those labels
 - Confidence doesn't transfer to new domains
 - Models become overconfident or underconfident on out-of-distribution data
 
-**Solution:** Separate training from optimization
-1. Training phase: Model learns STRUCTURE (triplets, evidence tags)
-2. Inference phase: Confidence EMERGES naturally
-3. Optimization phase: SPO calibrates that emergent confidence
+**Solution:** Separate training from downstream scoring
+1. Training phase: Model learns STRUCTURE (triplets, evidence tags, throughline)
+2. Inference phase: Base model emits premise text without frozen numeric confidence
+3. Downstream phase: A judge or calibrator can score that text later
 
 **Why this works:**
 - No training-time leakage of confidence information
-- Confidence emerges from learned patterns
-- SPO can optimize what the model actually produces
+- Static synthetic numerics do not hard-code one scorer's certainty into SFT labels
+- Downstream judges can update scores without regenerating the whole corpus
 - Better generalization to new tasks
 
 ## Three-Phase Workflow
@@ -29,7 +29,7 @@ High-level architecture and the reasoning behind key design decisions.
 │                                                         │
 │ Inputs: Quotes (any text)                              │
 │ Output: Structured reasoning (triplets + syllogism)    │
-│ Evidence tags: observed/inferred (NO confidence yet)   │
+│ Evidence tags: observed/inferred (+ optional audit scores) │
 └─────────────────────────────────────────────────────────┘
                            ↓
 ┌─────────────────────────────────────────────────────────┐
@@ -43,13 +43,13 @@ High-level architecture and the reasoning behind key design decisions.
 └─────────────────────────────────────────────────────────┘
                            ↓
 ┌─────────────────────────────────────────────────────────┐
-│ Phase 3: OPTIMIZE (SPO)                                 │
-│ Trained Model → Confidence Calibration                 │
+│ Phase 3: SCORE / CALIBRATE                              │
+│ Trained Model → External Judge / Calibrator            │
 │                                                         │
-│ Model generates: Triplets WITH confidence (emergent)   │
-│ Reward: correctness × confidence                       │
-│ Loss: Policy gradient to maximize reward               │
-│ Learn: Accurate confidence calibration                 │
+│ Model generates: Triplets + throughline text           │
+│ Judge assigns quality or confidence post hoc           │
+│ Reward can be built off the text directly              │
+│ Numeric scores stay permeable instead of frozen        │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -114,8 +114,8 @@ subject | rel | obj
 
 **In training data:**
 ```
-subject | relation (observed, confidence=1.0) | object
-subject | relation (inferred, confidence=0.75) | object
+subject | relation (observed) | object
+subject | relation (inferred) | object
 ```
 
 **WRONG approach:**
@@ -125,9 +125,9 @@ subject | relation | object | confidence=0.75  ← Don't do this!
 
 **Why tags?**
 - Tags are PROPERTIES of premises (observed vs inferred)
-- Confidence is model OUTPUT (not training input)
-- Model learns: "observed" → confidence=1.0, "inferred" → calibrated lower
-- No overfitting because confidence isn't labeled in training
+- Numeric confidence is downstream metadata, not the supervised target
+- Model learns the reasoning structure first; scores can be assigned later
+- No overfitting because static synthetic numerics are not labeled in training
 
 ### 3. Triplets as Structured Output
 
@@ -225,17 +225,16 @@ Raw Quotes (any text)
    Output: Triplets with evidence tags
          ↓
    [INFER]
-   Model generates: Triplets + confidence
-   Confidence: Emergent (not from training)
-         ↓
-   [EVALUATE]
-   Score: correctness × confidence
-   Select: High-confidence correct outputs
-         ↓
-   [OPTIMIZE (SPO)]
-   Reward: Model predictions with high confidence + correctness
-   Loss: Policy gradient to maximize reward
-   Result: Calibrated confidence
+   Model generates: Triplets + throughline
+   Confidence: optional post-hoc scoring
+          ↓
+   [JUDGE / CALIBRATE]
+   Score: judged textual quality or optional downstream confidence
+   Select: high-quality outputs
+          ↓
+   [OPTIMIZE]
+   Reward: downstream score over generated text
+   Result: calibrated or judged confidence layer
 ```
 
 ## Deployment Architecture

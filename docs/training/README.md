@@ -243,7 +243,20 @@ training_args = TrainingArguments(
 
 ## Training with SPO (Optional)
 
-After base training, optimize confidence with SPO:
+After base training, you can add a downstream scorer or calibration pass. The base `output_text` target should stay confidence-free:
+
+```text
+Non-Entailed Premises:
+  thumbs | are (observed) | pricking
+
+Entailed Premises:
+  something | is (inferred) | wicked
+
+Throughline:
+  When one feels a premonition or intuitive sense, something bad is approaching.
+```
+
+If you still want SPO-style optimization, do it after the base model is already emitting premises + throughline reliably:
 
 ```python
 from src.spo_trainer import SPOTrainer, SPOEvaluator

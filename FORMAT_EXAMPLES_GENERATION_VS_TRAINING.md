@@ -28,11 +28,11 @@ Non-Entailed Premises:
 "By the pricking of my thumbs, Something wicked this way comes."
 
 Non-Entailed Premises:
-  - thumbs | are (observed, confidence=1.0) | pricking
+  - thumbs | are (observed) | pricking
 
 Entailed Premises:
-  - something | is (inferred, confidence=0.75) | wicked
-  - something | is (inferred, confidence=0.8) | coming
+  - something | is (inferred) | wicked
+  - something | is (inferred) | coming
 
 Throughline:
   When one feels a premonition or intuitive sense, something bad is approaching.
@@ -62,13 +62,13 @@ Non-Entailed Premises:
 "Be yourself; everyone else is already taken."
 
 Non-Entailed Premises:
-  - social conformity | is (observed, confidence=1.0) | undesirable
-  - everyone else | is (observed, confidence=1.0) | already taken
+  - social conformity | is (observed) | undesirable
+  - everyone else | is (observed) | already taken
 
 Entailed Premises:
-  - people | are (observed, confidence=1.0) | unique individuals
-  - copying others | is (observed, confidence=1.0) | redundant
-  - authenticity | is (observed, confidence=1.0) | the only way to be oneself
+  - people | are (observed) | unique individuals
+  - copying others | is (observed) | redundant
+  - authenticity | is (observed) | the only way to be oneself
 
 Throughline:
   One should embrace their own uniqueness and not attempt to imitate others.
@@ -122,29 +122,27 @@ Never leave sections blank or use other variations like "none", "empty", or "nul
 
 ---
 
-## Confidence Scores (Always Preserved)
+## Confidence Scores (Generation-Time Only)
 
-All triplets include confidence scores and tags:
+Synthetic generation can retain confidence scores and tags for audit:
 
 ```
 subject | relation (tag, confidence=X) | object
 ```
 
-Where:
-- `tag` = `observed` or `inferred`
-- `confidence` = float 0.0-1.0
+Training rows drop the numeric score and keep the tag:
 
 Example:
 ```
-something | is (inferred, confidence=0.75) | wicked
-people | are (observed, confidence=1.0) | unique individuals
+something | is (inferred) | wicked
+people | are (observed) | unique individuals
 ```
 
 ---
 
 ## Training Data Format (What's Actually Used)
 
-The repo's production dataset uses **TRAINING FORMAT**:
+The repo's production dataset uses **TRAINING FORMAT** with confidence-free targets:
 
 ```
 File: data/train_clean_for_model_967.jsonl
@@ -159,7 +157,7 @@ output_text = same as input_text (model learns to reproduce this exact format)
 
 ## Generation/Inference Format (What Model Produces)
 
-When the trained model is asked to generate reasoning for a NEW quote:
+When the trained model is asked to generate reasoning for a NEW quote, the base target remains confidence-free and any numeric scoring is applied later by a judge or calibrator:
 
 ```
 Input:  "Some new quote here"
@@ -216,5 +214,6 @@ This produces better negative inference capability than other ordering strategie
 - **Training**: Non-Entailed → Entailed → Throughline (pedagogical)
 - **Generation**: Throughline → Entailed → Non-Entailed (logical)
 - **Field name**: Throughline (locked)
-- **Always preserve**: Confidence scores and tags
+- **Always preserve in training**: Evidence tags
+- **Keep numeric confidence downstream**: add it later if needed
 - **Always explicit**: Use N/A for empty sections

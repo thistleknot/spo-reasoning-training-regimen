@@ -41,8 +41,9 @@ class TrainingFormat:
     include_entailed: bool = True
     
     # Evidence tags are FEATURES the model learns (observed vs inferred)
-    # NOT confidence scores - those are model OUTPUT, not training INPUT
+    # Numeric confidence stays post-hoc by default.
     include_evidence_tags: bool = True
+    include_confidence_scores: bool = False
     
     def to_dict(self) -> Dict[str, Any]:
         """Serialize to dict."""
@@ -53,6 +54,7 @@ class TrainingFormat:
             "include_non_entailed": self.include_non_entailed,
             "include_entailed": self.include_entailed,
             "include_evidence_tags": self.include_evidence_tags,
+            "include_confidence_scores": self.include_confidence_scores,
         }
     
     @classmethod
@@ -65,6 +67,7 @@ class TrainingFormat:
             include_non_entailed=d.get("include_non_entailed", True),
             include_entailed=d.get("include_entailed", True),
             include_evidence_tags=d.get("include_evidence_tags", True),
+            include_confidence_scores=d.get("include_confidence_scores", False),
         )
 
 
@@ -193,8 +196,8 @@ class PipelineConfig:
         return cls(
             training_format=TrainingFormat(
                 syllogism_source=SyllogismSource.NONE,
-                confidence_scheme=ConfidenceScheme.EXPLICIT_SCORES,
                 premise_ordering=PremiseOrdering.PEDAGOGICAL,
+                include_confidence_scores=False,
             ),
             entity_normalization=EntityNormalization(enable_synset_collapse=True),
             graph_traversal=GraphTraversal(confidence_threshold=0.5),

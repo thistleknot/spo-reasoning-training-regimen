@@ -34,11 +34,11 @@ Non-Entailed Premises:
 
 ```
 Non-Entailed Premises:
-  - thumbs | are (observed, confidence=1.0) | pricking
+  - thumbs | are (observed) | pricking
 
 Entailed Premises:
-  - something | is (inferred, confidence=0.75) | wicked
-  - something | is (inferred, confidence=0.8) | coming
+  - something | is (inferred) | wicked
+  - something | is (inferred) | coming
 
 Throughline:
   When one feels a premonition or intuitive sense, something bad is approaching.
@@ -50,12 +50,12 @@ Throughline:
 "Quote text or statement here"
 
 Non-Entailed Premises:
-  - premise_1 | relation (tag, confidence=X) | object
-  - premise_2 | relation (tag, confidence=Y) | object
+  - premise_1 | relation (tag) | object
+  - premise_2 | relation (tag) | object
 
 Entailed Premises:
-  - premise_3 | relation (tag, confidence=Z) | object
-  - premise_4 | relation (tag, confidence=W) | object
+  - premise_3 | relation (tag) | object
+  - premise_4 | relation (tag) | object
 
 Throughline:
   Text of reasoning or N/A if none
@@ -114,10 +114,11 @@ Non-Entailed Premises:
 - ✅ DO write: `Non-Entailed Premises:\nN/A`
 - **Why**: Prevents hallucinations, keeps things explicit, clear model expectations
 
-### 6. Preserve Confidence Scores
-- ❌ DO NOT drop: `premise | relation | object` (loses confidence)
-- ✅ DO keep: `premise | relation (confidence: 0.95) | object`
-- **Why**: Transparency, traceability, signal for model about certainty levels
+### 6. Keep Confidence Downstream of Training
+- ❌ DO NOT freeze synthetic numerics into training rows
+- ✅ DO keep: `premise | relation (tag) | object` in the supervised target
+- ✅ DO allow: `premise | relation (tag, confidence=0.95) | object` in generation-time audit records
+- **Why**: Training should teach reasoning structure; numeric scoring is better assigned post hoc by a judge or calibrator
 
 ### 7. Contrastive Learning: Order Matters
 - **Non-Entailed Premises MUST be first in training format** (pedagogical ordering)
@@ -135,8 +136,8 @@ Non-Entailed Premises:
 ```
 
 ### Confidence Format
-- Input: `(tag, confidence=0.95)` where tag ∈ {observed, inferred}
-- Output: `(confidence: 0.95)` (tag optional if obvious from context)
+- Generation/audit format: `(tag, confidence=0.95)` where tag ∈ {observed, inferred}
+- Training/base-inference format: `(tag)`
 
 ### Empty Sections
 ```
@@ -163,27 +164,27 @@ Training input to model:
 "By the pricking of my thumbs, Something wicked this way comes."
 
 Non-Entailed Premises:
-  - thumbs | are (observed, confidence=1.0) | pricking
+  - thumbs | are (observed) | pricking
 
 Entailed Premises:
-  - something | is (inferred, confidence=0.75) | wicked
-  - something | is (inferred, confidence=0.8) | coming
+  - something | is (inferred) | wicked
+  - something | is (inferred) | coming
 
 Throughline:
   When one feels a premonition or intuitive sense, something bad is approaching.
 ```
 
-Expected model output (Generation Format - logical order):
+Expected model output (base training target):
 ```
-Throughline:
-  When one feels a premonition or intuitive sense, something bad is approaching.
-
-Entailed Premises:
-  - something | is (inferred, confidence=0.75) | wicked
-  - something | is (inferred, confidence=0.8) | coming
-
 Non-Entailed Premises:
-  - thumbs | are (observed, confidence=1.0) | pricking
+  - thumbs | are (observed) | pricking
+
+Entailed Premises:
+  - something | is (inferred) | wicked
+  - something | is (inferred) | coming
+
+Throughline:
+  When one feels a premonition or intuitive sense, something bad is approaching.
 ```
 
 ### Example 2: Be Yourself (Training Format)

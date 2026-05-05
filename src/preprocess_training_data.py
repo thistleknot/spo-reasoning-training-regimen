@@ -6,7 +6,6 @@ structured dictionaries suitable for model training.
 
 Input (serialized hybrid format):
   Quote: "..."
-  Candidate NOT_ENTAILED: [list of triplets]
   Entailed Premises: [list of triplets]
   Non-Entailed Premises: [list of triplets]
   Syllogism: "text or N/A"
@@ -14,7 +13,6 @@ Input (serialized hybrid format):
 Output (structured training format):
   {
     "quote": "...",
-    "candidate_not_entailed": ["triplet1", "triplet2", ...] or None,
     "entailed_premises": ["triplet1", ...] or None,
     "non_entailed_premises": ["triplet1", ...] or None,
     "syllogism": "text" or None
@@ -75,6 +73,13 @@ def extract_section(text: str, header: str) -> str:
     return text[content_start:next_header].strip()
 
 
+def extract_quote(text: str) -> str:
+    """Extract the raw quote prefix before the first structured section."""
+    header_start = text.find("**")
+    quote_text = text[:header_start] if header_start > 0 else text
+    return quote_text.strip().strip('"').strip()
+
+
 def preprocess_training_record(record: dict) -> dict:
     """Convert hybrid format record to structured training dict.
     
@@ -87,17 +92,7 @@ def preprocess_training_record(record: dict) -> dict:
     input_text = record.get("input_text", "")
     output_text = record.get("output_text", "")
     
-    # Extract quote: everything before first **Candidate
-    candidate_marker = "**Candidate NOT_ENTAILED"
-    candidate_pos = input_text.find(candidate_marker)
-    if candidate_pos > 0:
-        quote = input_text[:candidate_pos].strip().strip('"').strip()
-    else:
-        quote = input_text.strip().strip('"').strip()
-    
-    # Extract candidate_not_entailed (from input, after the header)
-    candidate_section = extract_section(input_text, "Candidate NOT_ENTAILED (for negative inference)")
-    candidate_not_entailed = parse_triplet_list(candidate_section)
+    quote = extract_quote(input_text)
     
     # Extract entailed_premises (from output)
     entailed_section = extract_section(output_text, "Entailed Premises")
@@ -119,7 +114,6 @@ def preprocess_training_record(record: dict) -> dict:
     
     return {
         "quote": quote,
-        "candidate_not_entailed": candidate_not_entailed,
         "entailed_premises": entailed_premises,
         "non_entailed_premises": non_entailed_premises,
         "syllogism": syllogism
@@ -139,7 +133,6 @@ def preprocess_training_dataset(input_file: str, output_file: str) -> dict:
     stats = {
         "total": 0,
         "processed": 0,
-        "with_candidate_context": 0,
         "with_entailed": 0,
         "with_non_entailed": 0,
         "with_syllogism": 0,
@@ -156,8 +149,6 @@ def preprocess_training_dataset(input_file: str, output_file: str) -> dict:
                 structured = preprocess_training_record(record)
                 
                 # Track stats
-                if structured["candidate_not_entailed"]:
-                    stats["with_candidate_context"] += 1
                 if structured["entailed_premises"]:
                     stats["with_entailed"] += 1
                 if structured["non_entailed_premises"]:
@@ -196,7 +187,6 @@ if __name__ == "__main__":
     print("\n=== PREPROCESSING STATISTICS ===")
     print(f"Total records: {stats['total']}")
     print(f"Successfully processed: {stats['processed']}")
-    print(f"  - With candidate context: {stats['with_candidate_context']}")
     print(f"  - With entailed premises: {stats['with_entailed']}")
     print(f"  - With non-entailed premises: {stats['with_non_entailed']}")
     print(f"  - With syllogism: {stats['with_syllogism']}")

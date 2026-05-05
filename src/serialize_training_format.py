@@ -1,8 +1,8 @@
 """
 Adapter: Convert preprocessed structured data to training format.
 
-Takes clean structured dicts (quote, candidate_not_entailed, entailed_premises, etc.)
-and serializes them to input_text/output_text format suitable for training.
+Takes clean structured dicts (quote, entailed_premises, non_entailed_premises,
+syllogism) and serializes them to input_text/output_text format suitable for training.
 
 This format is CLEAN (no markdown markers, only data).
 """
@@ -35,8 +35,8 @@ def serialize_training_record(structured_record: dict) -> dict:
     - Throughline last (the conclusion)
     
     Args:
-        structured_record: {quote, candidate_not_entailed, entailed_premises, 
-                           non_entailed_premises, throughline}
+        structured_record: {quote, entailed_premises, non_entailed_premises,
+                           throughline}
     
     Returns:
         {input_text, output_text} for trainer

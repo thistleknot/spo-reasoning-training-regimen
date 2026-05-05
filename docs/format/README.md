@@ -5,7 +5,7 @@ Complete specification for the SPO reasoning training format.
 ## Overview
 
 The training format encodes semantic reasoning as structured triplets (subject-relation-object) with evidence tags and confidence scores. This enables:
-- **Candidate NOT_ENTAILED (for negative inference)** — Premises that don't support the conclusion
+- **Non-Entailed Premises** — Premises that don't support the conclusion
 - **Entailed Premises** — Premises that logically support the conclusion
 - **Throughline** — The abductive hypothesis connecting premises to conclusion
 - **Confidence calibration** (via SPO optimization)

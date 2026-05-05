@@ -98,7 +98,7 @@ Throughline:
 
 - `Throughline` (not "Conclusion", not "Syllogism")
 - `Entailed Premises` (not "Entailed Facts", not "True Premises")
-- `Non-Entailed Premises` (not "False Premises", not "Candidate NOT_ENTAILED")
+- `Non-Entailed Premises` (canonical label for negative examples)
 
 ---
 

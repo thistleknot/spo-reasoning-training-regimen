@@ -76,14 +76,9 @@ The same quote moves through a few different shapes before it becomes a training
 
 ### 1. Synthetic generation scaffold
 
-This is where the earlier comment about **`Candidate NOT_ENTAILED (for negative inference)`** shows up. It is an upstream extraction/preprocessing label, not the final heading the trained model is supposed to emit.
-
 ```text
 Input:
 "By the pricking of my thumbs, Something wicked this way comes."
-
-Candidate NOT_ENTAILED (for negative inference):
-  - thumbs | are (observed, confidence=1.0) | pricking
 
 Completion:
 Throughline:
@@ -104,9 +99,6 @@ The preprocessing step strips hybrid markdown wrappers, extracts named sections,
 ```json
 {
   "quote": "By the pricking of my thumbs, Something wicked this way comes.",
-  "candidate_not_entailed": [
-    "thumbs | are (observed, confidence=1.0) | pricking"
-  ],
   "entailed_premises": [
     "something | is (inferred, confidence=0.75) | wicked",
     "something | is (inferred, confidence=0.8) | coming"
@@ -136,12 +128,6 @@ Throughline:
 When one feels a premonition or intuitive sense, something bad is approaching.
 ```
 
-So the short answer to the prior question is:
-
-- **`Candidate NOT_ENTAILED (for negative inference)`** is useful upstream as extraction context
-- **`Non-Entailed Premises`** is the canonical section name in the training and landing-page examples
-- The landing README now shows both so the transformation is explicit
-
 ## Why the format matters
 
 The core design choice is that the repo uses different orders for different stages of the pipeline.
@@ -152,7 +138,7 @@ The core design choice is that the repo uses different orders for different stag
 | Training | Non-Entailed -> Entailed -> Throughline | Negative inference first; better contrastive signal |
 | Inference | Non-Entailed -> Entailed -> Throughline | The model tends to emit what it was taught |
 
-This matters because the training target is not just "state the answer." It teaches the model what does **not** support the conclusion before teaching what does. That is the job of **Candidate NOT_ENTAILED** premises.
+This matters because the training target is not just "state the answer." It teaches the model what does **not** support the conclusion before teaching what does. That is the job of **non-entailed premises**.
 
 For the full specification, examples, and exact `Input` / `Completion` layout, read `docs/format/README.md`.
 
@@ -162,7 +148,7 @@ The repo's filtering/cleaning path is conservative and explicit rather than magi
 
 1. **Parse the hybrid record** via `src/preprocess_training_data.py`
    - Pull the quote out of `input_text`
-   - Extract `Candidate NOT_ENTAILED`, `Entailed Premises`, `Non-Entailed Premises`, and `Conclusion` / `Syllogism`
+   - Extract `Entailed Premises`, `Non-Entailed Premises`, and `Conclusion` / `Syllogism`
 2. **Normalize section values**
    - Empty or explicit `N/A` sections become `None` in the structured record
    - Missing markdown wrappers are handled by the section extractor when possible

@@ -450,9 +450,31 @@ No special tokens. No separate adapters. No hidden prompt contract. 2× adapter 
 
 **Short-term mitigation (no retraining):** Constrained decoding — use a `LogitsProcessor` to hard-constrain the first K tokens to the correct header sequence. The model generates the right headers without retraining or special tokens in the prompt.
 
+### 6. Evaluation scripts must use the same prompt format as training
+
+Post-training gate verification showed BASE REASONING producing `NO_HEADER` on every sample despite training successfully. The model scored avg_header_score=0.125 on the initial gate run. Increasing `max_new_tokens` from 192 to 512 made no difference. The actual cause: the verification script passed `record["input_text"]` directly to the tokenizer instead of wrapping it in the chat template via `build_generation_prompt(tokenizer, text)`.
+
+**Why it matters:** An instruct model trained with the Qwen chat format (`<|im_start|>user...<|im_end|><|im_start|>assistant`) expects to see that exact structure at inference time. When given raw text continuation input, the model never enters its "assistant turn" generation mode and produces either nothing or instruction echo rather than the expected structured output. The model was not broken — the evaluation harness was using the wrong prompt format.
+
+**Fix:**
+```python
+from src.chat_format import build_generation_prompt, strip_response_preamble
+
+# Training used:  build_training_conversation(tokenizer, input_text, output_text)
+# Inference must: build_generation_prompt(tokenizer, input_text)
+chat_prompt = build_generation_prompt(tokenizer, record["input_text"])
+# Then strip <think>...</think> from output before scoring:
+output = strip_response_preamble(decoded_output)
+score = contract.header_score(output)
+```
+
+**After fix:** FACTS avg_header_score=1.000, BASE REASONING avg_header_score=0.917, overall=0.958. Gate: PASS.
+
+**Rule of thumb:** Any script that evaluates a fine-tuned instruct model must mirror the exact tokenizer call chain used during training. If training used `apply_chat_template`, evaluation must too. A mismatch is silent — there is no error; the model simply produces irrelevant output. The symptom (NO_HEADER, generic text, instruction echo) is easily misdiagnosed as a training problem or a token-budget problem when the root cause is purely a format mismatch in the evaluation harness.
+
 ### Takeaway
 
-For any RL-from-feedback training loop: (1) generation controls must prevent degenerate outputs before rewards are ever computed, (2) reward functions must explicitly penalise known failure modes rather than only rewarding the ideal case, (3) reward signals computed from gold data are always suspect — check that the distribution of rewards across your training set actually varies before assuming SPO is doing anything useful, (4) offline preference optimisation cannot correct a habit the model has never been penalised for producing — if the failure mode is a specific generated token sequence, only online generation-and-penalise RL can reliably fix it, and (5) for small models, multi-regimen training on semantically overlapping formats requires stratified sampling across (regimen × prompt-length) strata — without it, whichever regimen dominates the data mix will corrupt the shared header vocabulary for the other regimens.
+For any RL-from-feedback training loop: (1) generation controls must prevent degenerate outputs before rewards are ever computed, (2) reward functions must explicitly penalise known failure modes rather than only rewarding the ideal case, (3) reward signals computed from gold data are always suspect — check that the distribution of rewards across your training set actually varies before assuming SPO is doing anything useful, (4) offline preference optimisation cannot correct a habit the model has never been penalised for producing — if the failure mode is a specific generated token sequence, only online generation-and-penalise RL can reliably fix it, (5) for small models, multi-regimen training on semantically overlapping formats requires stratified sampling across (regimen × prompt-length) strata — without it, whichever regimen dominates the data mix will corrupt the shared header vocabulary for the other regimens, and (6) post-training evaluation scripts must mirror the exact prompt-format pipeline used during training — a chat-template mismatch produces NO_HEADER silently and is trivially diagnosed as a training bug or token-budget problem when the real cause is a one-line harness error.
 
 ---
 

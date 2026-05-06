@@ -110,7 +110,68 @@ class SPOEvaluatorRepetitionTests(unittest.TestCase):
         self.assertGreaterEqual(score_with_gt, score_without_gt)
 
 
-class SPODataQualityScorerTests(unittest.TestCase):
+class SPOEvaluatorHeaderTests(unittest.TestCase):
+    """Lock the section header quality gate in evaluate_triplet_correctness."""
+
+    PERFECT_OUTPUT = (
+        "Non-Entailed Premises:\n"
+        "silence | implies (inferred, confidence=0.8) | wisdom\n\n"
+        "Entailed Premises:\n"
+        "talking | confirms (observed, confidence=1.0) | foolishness\n\n"
+        "Throughline:\n"
+        "remaining silent avoids confirming foolishness\n"
+    )
+    GARBLED_OUTPUT = (
+        "Non-Entailed Prems:\n"
+        "silence | implies (inferred, confidence=0.8) | wisdom\n\n"
+        "Entailed Prims:\n"
+        "talking | confirms (observed, confidence=1.0) | foolishness\n\n"
+        "Throughlin':\n"
+        "remaining silent avoids confirming foolishness\n"
+    )
+    TWO_OF_THREE_OUTPUT = (
+        "Non-Entailed Premises:\n"
+        "silence | implies (inferred, confidence=0.8) | wisdom\n\n"
+        "Entailed Premises:\n"
+        "talking | confirms (observed, confidence=1.0) | foolishness\n"
+    )
+
+    def test_all_canonical_headers_score_full(self) -> None:
+        """Output with all three canonical headers should yield header_score=1.0."""
+        self.assertAlmostEqual(SPOEvaluator._header_score(self.PERFECT_OUTPUT), 1.0)
+
+    def test_garbled_headers_score_zero(self) -> None:
+        """Output with garbled/abbreviated headers should yield header_score=0.0."""
+        self.assertEqual(SPOEvaluator._header_score(self.GARBLED_OUTPUT), 0.0)
+
+    def test_partial_headers_score_fractional(self) -> None:
+        """Output with 2 of 3 canonical headers should yield header_score ~0.667."""
+        score = SPOEvaluator._header_score(self.TWO_OF_THREE_OUTPUT)
+        self.assertAlmostEqual(score, 2 / 3, places=2)
+
+    def test_perfect_output_scores_one(self) -> None:
+        """Output with all canonical headers, proper triplets, confidence, and tags scores 1.0."""
+        score = SPOEvaluator.evaluate_triplet_correctness(self.PERFECT_OUTPUT)
+        self.assertAlmostEqual(score, 1.0, places=2)
+
+    def test_garbled_headers_score_lower_than_canonical(self) -> None:
+        """Same triplet content but garbled headers should score lower than canonical headers."""
+        garbled = SPOEvaluator.evaluate_triplet_correctness(self.GARBLED_OUTPUT)
+        canonical = SPOEvaluator.evaluate_triplet_correctness(self.PERFECT_OUTPUT)
+        self.assertGreater(canonical, garbled)
+
+    def test_no_headers_output_loses_header_weight(self) -> None:
+        """An output with no section headers at all should lose the full 0.35 header weight."""
+        no_headers = (
+            "silence | implies (inferred, confidence=0.8) | wisdom\n"
+            "talking | confirms (observed, confidence=1.0) | foolishness\n"
+        )
+        score = SPOEvaluator.evaluate_triplet_correctness(no_headers)
+        # Max possible without any header credit: 0.25 + 0.15 + 0.15 + 0.1 = 0.65
+        self.assertLessEqual(score, 0.65 + 1e-6)
+
+
+
     """Lock the pre-computed data-quality scorer used to differentiate SPO training rewards."""
 
     def _make_record(self, output_text: str) -> dict:

@@ -268,6 +268,43 @@ class SPOTrainer:
 class SPOEvaluator:
     """Evaluate model outputs for SPO reward computation."""
 
+    # Canonical section headers required in the output, in order.
+    # These must match the training data format exactly — any deviation is a format error.
+    CANONICAL_HEADERS: list = [
+        "Non-Entailed Premises:",
+        "Entailed Premises:",
+        "Throughline:",
+    ]
+
+    @staticmethod
+    def _header_score(model_output: str) -> float:
+        """Score section header correctness.
+
+        Identifies all header-like lines (short, ends with ':', no pipe chars) and
+        checks how many canonical headers are present with exact spelling.
+
+        A garbled header (e.g. 'Throughlin':' or 'Entailed Prims:') counts as a
+        header attempt that failed — it is treated as 0 credit for that slot while
+        occupying the slot (i.e. the model tried but got it wrong, not that it was
+        absent). This is strictly harsher than absence because absence is neutral
+        (the section might be optional) whereas a misspelled header signals the model
+        doesn't know the correct label.
+
+        Returns fraction of canonical headers present with exact match [0.0-1.0].
+        """
+        canonical = SPOEvaluator.CANONICAL_HEADERS
+        lines = model_output.splitlines()
+        # A header-like line: stripped, ends with ':', no '|', length <= 60
+        header_lines = {
+            line.strip()
+            for line in lines
+            if line.strip().endswith(":")
+            and "|" not in line
+            and len(line.strip()) <= 60
+        }
+        hits = sum(1 for h in canonical if h in header_lines)
+        return hits / len(canonical)
+
     @staticmethod
     def evaluate_triplet_correctness(
         model_output: str,
@@ -276,12 +313,13 @@ class SPOEvaluator:
         """Evaluate correctness of triplet-based output.
 
         Scores based on:
-        - Triplet format preservation (subject | relation | object) [0.4 weight]
-        - Confidence score presence [0.2 weight]
-        - Evidence tag correctness (observed vs inferred) [0.2 weight]
+        - Triplet format preservation (subject | relation | object) [0.25 weight]
+        - Section header correctness (exact canonical names) [0.35 weight]
+        - Confidence score presence [0.15 weight]
+        - Evidence tag correctness (observed vs inferred) [0.15 weight]
         - Uniqueness ratio: hard-zero if > half the triplet lines are duplicates [gate]
         - Non-self-referential content: deduct if tautological triplets dominate [0.1 weight]
-        - Ground-truth overlap via SequenceMatcher if provided [0.1 bonus]
+        - Ground-truth overlap via SequenceMatcher if provided [0.1 bonus, capped at 1.0]
 
         Returns score 0.0-1.0
         """
@@ -295,7 +333,7 @@ class SPOEvaluator:
             if triplet_pattern.search(line)
         ]
 
-        # Uniqueness gate: heavy penalty for repetitive outputs
+        # Uniqueness gate: hard-zero if more than half of all triplet lines are duplicates
         if triplet_lines:
             unique_ratio = len(set(triplet_lines)) / len(triplet_lines)
             if unique_ratio < 0.5:
@@ -303,35 +341,36 @@ class SPOEvaluator:
 
         score = 0.0
 
-        # Format check
+        # Triplet format check [0.25]
         if triplet_lines:
-            score += 0.4
+            score += 0.25
 
-        # Confidence annotation
+        # Section header correctness [0.35] — canonical exact-match fraction
+        score += 0.35 * SPOEvaluator._header_score(model_output)
+
+        # Confidence annotation [0.15]
         if re.search(r"confidence=", model_output):
-            score += 0.2
+            score += 0.15
 
-        # Evidence tags
+        # Evidence tags [0.15]
         if re.search(r"\b(observed|inferred)\b", model_output):
-            score += 0.2
+            score += 0.15
 
         # Tautology penalty: subject appears as a substring of the object field,
-        # e.g. "the speaker | is ... | is the speaker" or "x | is | x itself"
+        # e.g. "the speaker | is ... | is the speaker" or "x | is | x itself" [0.1]
         def _is_tautological(line: str) -> bool:
             parts = [p.strip().lower() for p in line.split("|")]
             if len(parts) < 3:
                 return False
             subject = parts[0].strip()
-            # Strip parenthetical annotations from the object part before comparing
             obj = re.sub(r"\(.*?\)", "", parts[2]).strip()
             return len(subject) >= 3 and subject in obj
 
         if triplet_lines:
             taut_ratio = sum(1 for t in triplet_lines if _is_tautological(t)) / len(triplet_lines)
-            # Add up to 0.1 when tautology rate is zero, subtract when high
             score += 0.1 * (1.0 - taut_ratio)
 
-        # Ground-truth overlap bonus (0.1)
+        # Ground-truth overlap bonus [0.1 max]
         if ground_truth and ground_truth.strip():
             import difflib
             overlap = difflib.SequenceMatcher(

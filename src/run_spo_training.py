@@ -46,6 +46,7 @@ class SPOTrainingConfig:
     regression_gate_samples: int = 5
     regression_min_avg_score: float = 0.25
     regression_min_per_sample_score: float = 0.0
+    regression_min_header_score: float = 0.5
     skip_regression_gate: bool = False
 
 
@@ -295,14 +296,28 @@ def run_spo_training(config: SPOTrainingConfig) -> dict:
             SPOEvaluator.evaluate_triplet_correctness(out, contract=c)
             for out, c in zip(gate_outputs, gate_contracts)
         ]
+        gate_header_scores = [
+            c.header_score(out) if c.expected_headers else 1.0
+            for c, out in zip(gate_contracts, gate_outputs)
+        ]
         gate_summary = {
             "samples": [
-                {"prompt_snippet": p[:80], "output": o, "score": s}
-                for p, o, s in zip(gate_prompts, gate_outputs, gate_scores)
+                {
+                    "prompt_snippet": p[:80],
+                    "output": o,
+                    "score": s,
+                    "header_score": hs,
+                    "expected_headers": c.expected_headers,
+                }
+                for p, o, s, hs, c in zip(
+                    gate_prompts, gate_outputs, gate_scores, gate_header_scores, gate_contracts
+                )
             ],
             "avg_score": sum(gate_scores) / len(gate_scores),
+            "avg_header_score": sum(gate_header_scores) / len(gate_header_scores),
             "min_avg_threshold": config.regression_min_avg_score,
             "min_per_sample_threshold": config.regression_min_per_sample_score,
+            "min_header_threshold": config.regression_min_header_score,
         }
         (output_dir / "regression_gate.json").write_text(
             json.dumps(gate_summary, indent=2) + "\n"
@@ -312,6 +327,7 @@ def run_spo_training(config: SPOTrainingConfig) -> dict:
             prompts=gate_prompts,
             min_avg_score=config.regression_min_avg_score,
             min_per_sample_score=config.regression_min_per_sample_score,
+            min_header_score=config.regression_min_header_score,
         )
 
     holdout_rewards, holdout_metrics = trainer.evaluate_batch(
@@ -360,6 +376,7 @@ if __name__ == "__main__":
     parser.add_argument("--regression-gate-samples", type=int, default=5)
     parser.add_argument("--regression-min-avg-score", type=float, default=0.5)
     parser.add_argument("--regression-min-per-sample-score", type=float, default=0.3)
+    parser.add_argument("--regression-min-header-score", type=float, default=0.5)
     parser.add_argument("--skip-regression-gate", action="store_true", default=False)
     args = parser.parse_args()
 

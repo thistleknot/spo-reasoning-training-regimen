@@ -352,6 +352,63 @@ class AssertOutputQualityTests(unittest.TestCase):
         with self.assertRaises(AssertionError):
             assert_output_quality([mediocre], min_avg_score=0.9, min_per_sample_score=0.0)
 
+    def test_garbled_headers_fail_header_gate(self) -> None:
+        """Abbreviated/garbled headers should fail the header gate even with good pipe structure."""
+        prompt = (
+            'Given this quote.\n\nGenerate a response with:\n'
+            '1. Non-Entailed Premises\n'
+            '2. Entailed Premises\n\nResponse:'
+        )
+        # Pipe structure fine but headers are abbreviated
+        garbled_output = (
+            "Non-Entailed Prems:\n"
+            "silence | implies (inferred, confidence=0.8) | wisdom\n\n"
+            "Entailed Prims:\n"
+            "talking | confirms (observed, confidence=1.0) | foolishness\n"
+        )
+        with self.assertRaises(AssertionError) as ctx:
+            assert_output_quality(
+                [garbled_output],
+                prompts=[prompt],
+                min_avg_score=0.0,
+                min_per_sample_score=0.0,
+                min_header_score=0.5,
+            )
+        self.assertIn("Header quality gate", str(ctx.exception))
+
+    def test_header_gate_disabled_at_zero(self) -> None:
+        """Setting min_header_score=0.0 disables the header gate entirely."""
+        prompt = (
+            'Given this quote.\n\nGenerate a response with:\n'
+            '1. Non-Entailed Premises\n'
+            '2. Entailed Premises\n\nResponse:'
+        )
+        garbled_output = (
+            "Non-Entailed Prems:\n"
+            "silence | implies (inferred, confidence=0.8) | wisdom\n\n"
+            "Entailed Prims:\n"
+            "talking | confirms (observed, confidence=1.0) | foolishness\n"
+        )
+        # Should not raise when header gate is disabled
+        assert_output_quality(
+            [garbled_output],
+            prompts=[prompt],
+            min_avg_score=0.0,
+            min_per_sample_score=0.0,
+            min_header_score=0.0,
+        )
+
+    def test_no_prompt_skips_header_gate(self) -> None:
+        """Without prompts there is no contract, so header score is 1.0 regardless of output."""
+        any_output = "Non-Entailed Prems:\nfoo | bar (observed, confidence=0.9) | baz\n"
+        # Would fail header gate if contract were applied — passes because no prompts given
+        assert_output_quality(
+            [any_output],
+            min_avg_score=0.0,
+            min_per_sample_score=0.0,
+            min_header_score=0.5,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

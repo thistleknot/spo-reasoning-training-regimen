@@ -96,6 +96,7 @@ def assert_output_quality(
     prompts: Optional[List[str]] = None,
     min_avg_score: float = 0.5,
     min_per_sample_score: float = 0.3,
+    min_header_score: float = 0.5,
 ) -> None:
     """Regression gate: raises AssertionError if generated outputs fall below thresholds.
 
@@ -103,27 +104,37 @@ def assert_output_quality(
     the prompt contract. A failing gate means the RL training has regressed output
     quality below an acceptable floor.
 
+    Header scoring is a *hard* separate gate — wrong or abbreviated section headers
+    (e.g. 'Entailed Prims:' instead of 'Entailed Premises:') fail this check even
+    when pipe structure and confidence annotations look fine. This prevents the
+    0.35 header weight in evaluate_triplet_correctness from being compensated by
+    other dimensions at a permissive avg threshold.
+
     Require:
         outputs is non-empty
-        min_avg_score and min_per_sample_score are in [0, 1]
+        min_avg_score, min_per_sample_score, min_header_score are in [0, 1]
     Guarantee:
         Raises AssertionError with per-sample details on any quality failure
-        Returns None (no exception) when all outputs pass both thresholds
+        Returns None (no exception) when all outputs pass all thresholds
     """
     if not outputs:
         raise AssertionError("assert_output_quality: outputs list is empty")
 
     scores = []
+    header_scores = []
     per_sample_failures = []
     for i, output in enumerate(outputs):
         contract = PromptContract.from_prompt(prompts[i]) if prompts else None
         score = SPOEvaluator.evaluate_triplet_correctness(output, contract=contract)
         scores.append(score)
+        hscore = contract.header_score(output) if contract and contract.expected_headers else 1.0
+        header_scores.append(hscore)
         if score < min_per_sample_score:
             preview = output.replace("\n", " ")[:120]
             per_sample_failures.append((i, score, preview))
 
     avg_score = sum(scores) / len(scores)
+    avg_header_score = sum(header_scores) / len(header_scores)
 
     if per_sample_failures:
         lines = [
@@ -139,6 +150,26 @@ def assert_output_quality(
         raise AssertionError(
             f"Output quality gate: avg_score={avg_score:.3f} below "
             f"avg floor {min_avg_score:.2f} across {len(outputs)} samples"
+        )
+
+    if avg_header_score < min_header_score:
+        bad = [
+            f"  sample {i}: header_score={h:.2f} — expected {c.expected_headers}"
+            for i, (h, c) in enumerate(
+                zip(
+                    header_scores,
+                    [
+                        PromptContract.from_prompt(prompts[j]) if prompts else PromptContract()
+                        for j in range(len(outputs))
+                    ],
+                )
+            )
+            if h < min_header_score
+        ]
+        raise AssertionError(
+            f"Header quality gate: avg_header_score={avg_header_score:.3f} below "
+            f"header floor {min_header_score:.2f} — model is generating garbled or "
+            f"abbreviated section headers\n" + "\n".join(bad)
         )
 
 

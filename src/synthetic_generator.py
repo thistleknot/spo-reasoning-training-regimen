@@ -51,6 +51,9 @@ Generate a response with:
 Format each premise as: subject | relation (tag, confidence=X) | object
 - tag: "observed" for explicit facts, "inferred" for derived
 - confidence: 1.0 for observed, 0.5-0.9 for inferred
+- IMPORTANT: the object field must NOT repeat the relation verb.
+  Write: "life | is (inferred) | a process"  (correct)
+  NOT:   "life | is (inferred) | is a process"  (wrong — 'is' appears twice)
 
 Response:
 """

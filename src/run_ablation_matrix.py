@@ -16,9 +16,12 @@ import json
 import math
 import random
 import re
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Sequence
+
+import numpy as np
 
 import torch
 from datasets import Dataset
@@ -157,28 +160,70 @@ def collator(tokenizer):
     return _collate
 
 
+def _length_buckets_for_records(records: List[dict], n_buckets: int = 3) -> List[int]:
+    """
+    Assign each record to a length bucket using quantile cuts over that regimen's
+    own length distribution, so buckets are always equally populated.
+
+    Require: records is non-empty.
+    Guarantee: returns a list of int bucket labels in [0, n_buckets-1].
+    """
+    lengths = np.array([
+        len(r.get("input_text", "") + r.get("output_text", ""))
+        for r in records
+    ], dtype=float)
+    quantiles = np.percentile(lengths, [100 * i / n_buckets for i in range(1, n_buckets)])
+    buckets = np.searchsorted(quantiles, lengths, side="right")
+    return [int(min(b, n_buckets - 1)) for b in buckets]
+
+
 def sample_mixture(
     regimen_to_records: Dict[str, Sequence[dict]],
     weights: Dict[str, float],
     target_size: int,
     seed: int,
+    n_length_buckets: int = 3,
 ) -> List[dict]:
-    rng = random.Random(seed)
-    active_weights = {name: weight for name, weight in weights.items() if name in regimen_to_records}
-    total_weight = sum(active_weights.values())
-    if total_weight <= 0:
-        raise ValueError("Mixture stage has no active regimens")
+    """
+    Stratified mixture sampling across (regimen × length_bucket) strata.
 
-    mixture = []
-    for regimen_name, weight in active_weights.items():
-        records = list(regimen_to_records[regimen_name])
-        if not records:
-            continue
-        rng.shuffle(records)
-        sample_size = max(1, int(round((weight / total_weight) * target_size)))
-        repeats = math.ceil(sample_size / len(records))
-        pool = (records * repeats)[:sample_size]
-        mixture.extend(pool)
+    Two-level balancing:
+      1. Between regimens  — caller-supplied ``weights`` control the gross split.
+      2. Within each regimen — equal quota sampling across ``n_length_buckets``
+         quantile buckets, so short/medium/long prompts contribute equally.
+
+    Require: at least one active regimen with records.
+    Guarantee: returns a shuffled list of <= target_size records.
+    Failure modes:
+      - empty active set → ValueError
+    """
+    rng = random.Random(seed)
+    active = {n: list(recs) for n, recs in regimen_to_records.items()
+              if n in weights and recs}
+    if not active:
+        raise ValueError("sample_mixture: no active regimens with records")
+
+    total_regimen_weight = sum(weights[n] for n in active)
+    mixture: List[dict] = []
+
+    for regimen_name, records in active.items():
+        regimen_fraction = weights[regimen_name] / total_regimen_weight
+        regimen_quota = max(1, int(round(regimen_fraction * target_size)))
+
+        # Quantile-based length bucketing within this regimen
+        bucket_labels = _length_buckets_for_records(records, n_length_buckets)
+        bucket_to_recs: Dict[int, List[dict]] = {}
+        for rec, bkt in zip(records, bucket_labels):
+            bucket_to_recs.setdefault(bkt, []).append(rec)
+
+        n_active_buckets = len(bucket_to_recs)
+        bucket_quota = max(1, regimen_quota // n_active_buckets)
+
+        for bkt, pool in bucket_to_recs.items():
+            rng.shuffle(pool)
+            repeats = math.ceil(bucket_quota / len(pool))
+            mixture.extend((pool * repeats)[:bucket_quota])
+
     rng.shuffle(mixture)
     return mixture[:target_size]
 

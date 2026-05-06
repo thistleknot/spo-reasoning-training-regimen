@@ -417,30 +417,42 @@ The reason is architectural: SPO as implemented here is **offline weighted SFT**
 
 **Short-term mitigation:** Constrained decoding (prefix forcing) or a few-shot prefix in the inference prompt that starts the output with the correct headers (`Non-Entailed Premises:\n`) can force correct headers at generation time without retraining.
 
-### 5. For small models, the adapter IS the routing signal — don't fight it with prompts
+### 5. For small models, balance the training data across (regimen × length) strata
 
 Single-regimen training on the facts format produced clean, full-length headers throughout. Once training was extended to a second regimen sharing the same semantic domain (logical entailment reasoning), headers degraded to abbreviations (`Entailed Prims:`, `Non-Entailed Prems:`). The original single-regimen training was fine; the problem was introduced entirely by combining regimens.
 
-**Mechanism:** Both regimens use nearly identical header vocabulary ("Entailed Premises:", "Non-Entailed Premises:"). When trained jointly, the gradients from each regimen are co-aligned but not identical — they point at the same token neighborhood with slightly different downstream structure expectations. The model converges to a weighted average over that neighborhood, and the base model's pre-training bias toward abbreviated forms (which were never fully suppressed, just outvoted by the single-regimen signal) re-emerges as the dominant pattern.
+**Mechanism:** Both regimens use nearly identical header vocabulary ("Entailed Premises:", "Non-Entailed Premises:"). When trained jointly, the gradients from each regimen are co-aligned but not identical — they point at the same token neighborhood with slightly different downstream structure expectations. The model converges to a weighted average over that neighborhood, and the base model's pre-training bias toward abbreviated forms (which were never fully suppressed, just outvoted by the single-regimen signal) re-emerges as the dominant pattern. A secondary amplifier is length imbalance: if one regimen's training records are systematically longer, those records dominate the gradient signal for the shared header tokens, reinforcing that regimen's abbreviation habits.
 
 **Why text prompts cannot solve this:** A text tag like `[FACTS]` occupies the same embedding space as all other vocabulary. For a 0.6B parameter model, learning a clean conditional `[FACTS] → full header names` is infeasible when the tag is semantically adjacent to the content tokens and the regimens share near-identical output vocabulary. This is scale-dependent: larger models (7B+) can learn such conditionals from text prompts alone; small models cannot.
 
 **Why special tokens are also wrong:** Special tokens require downstream users to inject a model-internal routing token they have no natural reason to know about. This creates a hidden contract — the model silently degrades for any user who doesn't know the required prefix. It's bad API design disguised as a training fix.
 
-**The correct architecture:** For a small model serving multiple structurally distinct output formats, the routing mechanism belongs in the **weight space, not the prompt**. Train a separate LoRA adapter per regimen. The adapter encodes the format; the prompt encodes the content. Downstream users interact with natural language prompts, and the operator selects the right adapter at deploy time. No hidden tokens, no prompt engineering required from the user side.
+**The correct fix — stratified sampling across (regimen × length) strata:**
+The problem is that the combined training mix is dominated by whichever regimen happens to have more or longer records. Fix this by ensuring every (regimen, prompt-length bucket) cell contributes equally to each training epoch.
 
-```
-adapter_facts/   ← load when you want 2-section entailment output
-adapter_base/    ← load when you want 3-section output with throughline
+The `sample_mixture()` function in `src/run_ablation_matrix.py` now implements this with two-level balancing:
+
+1. **Between regimens** — the caller supplies explicit mixing weights (e.g., 60% base / 25% facts / 15% syllogism). These weights are respected as-is.
+2. **Within each regimen** — records are bucketed by their prompt length using quantile cuts (so buckets are always equally populated regardless of the actual length distribution). An equal quota is drawn from each bucket, preventing a regimen's long-prompt records from drowning out its short-prompt examples.
+
+```python
+# src/run_ablation_matrix.py — sample_mixture()
+#
+# Within each regimen, length quantiles are computed on that regimen's own
+# records, so bucket boundaries adapt to the distribution rather than
+# using a fixed character-count threshold.
+# Bucket quota is regimen_quota // n_active_buckets — equal weight per bucket.
 ```
 
-2× adapter storage (a few MB each) is the only cost. Gradient conflict is eliminated by construction.
+No special tokens. No separate adapters. No hidden prompt contract. 2× adapter storage cost becomes zero.
+
+**Remaining failure mode if the base adapter already has abbreviation bias baked in:** SPO (offline weighted SFT) cannot correct abbreviation habits — it only reweights gold tokens and never generates bad headers to penalise them. If the starting checkpoint was itself trained on a misbalanced multi-regimen mix, the abbreviation pattern will survive SPO. The fix is to apply stratified sampling at the **base training stage**, not just the fine-tuning stage.
 
 **Short-term mitigation (no retraining):** Constrained decoding — use a `LogitsProcessor` to hard-constrain the first K tokens to the correct header sequence. The model generates the right headers without retraining or special tokens in the prompt.
 
 ### Takeaway
 
-For any RL-from-feedback training loop: (1) generation controls must prevent degenerate outputs before rewards are ever computed, (2) reward functions must explicitly penalise known failure modes rather than only rewarding the ideal case, (3) reward signals computed from gold data are always suspect — check that the distribution of rewards across your training set actually varies before assuming SPO is doing anything useful, (4) offline preference optimisation cannot correct a habit the model has never been penalised for producing — if the failure mode is a specific generated token sequence, only online generation-and-penalise RL can reliably fix it, and (5) for small models, multi-regimen training on semantically overlapping formats is the wrong architecture — separate adapters per regimen eliminate gradient conflict and preserve clean natural-language prompts for downstream users.
+For any RL-from-feedback training loop: (1) generation controls must prevent degenerate outputs before rewards are ever computed, (2) reward functions must explicitly penalise known failure modes rather than only rewarding the ideal case, (3) reward signals computed from gold data are always suspect — check that the distribution of rewards across your training set actually varies before assuming SPO is doing anything useful, (4) offline preference optimisation cannot correct a habit the model has never been penalised for producing — if the failure mode is a specific generated token sequence, only online generation-and-penalise RL can reliably fix it, and (5) for small models, multi-regimen training on semantically overlapping formats requires stratified sampling across (regimen × prompt-length) strata — without it, whichever regimen dominates the data mix will corrupt the shared header vocabulary for the other regimens.
 
 ---
 

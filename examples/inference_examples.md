@@ -1,151 +1,154 @@
-# Inference Examples — SPO v2 Sniff Test
+# Inference Examples — SPO v4 Sniff Test
 
-Generated from: `output/spo_chatfix_facts_v2/sniff_test.json`  
-Adapter: `output/spo_chatfix_facts_v2/adapter`  
-Base adapter: `output/ablations_chatfix_baseonly/base-only/adapter`  
+Generated from: sniff test run against `output/spo_chatfix_facts_v4/adapter`  
+Adapter: `output/spo_chatfix_facts_v4/adapter`  
+Base adapter: `output/ablations_chatfix_baseonly/base-only/adapter`
 
-## Base Adapter (no SPO)
+**Regression gate result (v4):** PASSED — avg score 0.61 (threshold 0.25), all 8 samples ≥ 0.0  
+**Inference config:** `repetition_penalty=1.3`, `no_repeat_ngram_size=4`, `max_new_tokens=300`, greedy decode
 
-Path: `output/ablations_chatfix_baseonly/base-only/adapter`
+---
 
-### Sample 1
-**Input:** It is better to remain silent at the risk of being thought a fool, than to talk and remove all doubt of it.
+> **Note on header quality:** Both base and v4 adapters still produce abbreviated section headers
+> (`Non-Entailed Prems:` instead of `Non-Entailed Premises:`). This is a known pre-existing
+> limitation of the base adapter that SPO-as-weighted-SFT cannot override. See Lessons Learned
+> in `README.md` for the full explanation.
 
-**Output:**
+---
+
+## Prompt format used
+
+```
+Given this quote, extract the implicit reasoning facts.
+
+Quote: "<quote>"
+
+Generate a response with:
+1. Non-Entailed Premises
+2. Entailed Premises
+
+Format each premise as: subject | relation (tag, confidence=X) | object
+```
+
+The prompt is parsed by `PromptContract.from_prompt()` which derives expected section headers
+`['Non-Entailed Premises:', 'Entailed Premises:']`. Both adapters still produce abbreviated variants
+(`Non-Entailed Prems:`, `Entailed Prims:`) — see Lesson 4 in README.md.
+
+---
+
+## Sample 1 — "remain silent and be thought a fool"
+
+**Quote:** "It is better to remain silent and be thought a fool than to speak and remove all doubt."
+
+### Base adapter output
+
+```
+Non-Entailed Preemptions:
+The speaker's tone or attitude towards others may not have been explicitly stated.
+Remaining silent could imply being unresponsive rather than foolishness.
+
+Entailed Premisses:
+Being removed from doubt by speaking leads to self-deprecation due to perceived failure in remaining silent.
+Speaking without removing doubts causes embarrassment because one might believe they are ignorant of their own ignorance.
+Silence allows for greater freedom compared to speech that removes doubt.
+Speech alone does not eliminate fear; it only reduces its impact on judgment if spoken aloud.
+Removing all doubt through silence prevents further negative consequences related to speaking.
+Saying nothing about your current state can prevent you from becoming an example of someone who speaks loudest when there's no need to do so.
+Avoiding public expression while maintaining internal clarity avoids unnecessary exposure during conversations where such expressions would cause discomfort.
+Spoken words should always include acknowledgment of uncertainty before asserting certainty.
+There exists a moral obligation to avoid expressing oneself publicly unless absolutely necessary.
+Publicly sharing personal struggles often results in social isolation or rejection.
+Fear of appearing stupid outweighs any benefit gained from avoiding criticism.
+```
+
+*Headers garbled: `Non-Entailed Preemptions:` / `Entailed Premisses:`. Pure prose — no pipe triplets.*
+
+### SPO v4 adapter output
+
 ```
 Non-Entailed Prems:
-
-The speaker's statement implies that speaking might lead to negative consequences.
-Speaking could be seen as removing doubts or causing embarrassment if done recklessly.
-
-Inferred Prims:
-
-Remaining silent may prevent others from judging one negatively due to lack of speech.
-Talking can create an illusion where someone else believes you are foolish because they have removed your doubts about their own actions.
-Being judged by others' opinions based on whether I speak or not removes my ability to question myself critically.
-
-Throughline:
-
-Avoiding public expression while maintaining self-awareness prevents potential judgmental scrutiny caused by external factors rather than internal conflict.
-```
-
-### Sample 2
-**Input:** Whenever you find yourself on the side of the majority, it is time to reform (or pause and reflect).
-
-**Output:**
-```
-Non-Entailed Prems:
-
-The speaker's statement implies that reframing or pausing should occur when one aligns themselves with the majority.
-Reframing/reflecting occurs only after finding oneself aligned with the majority.
+The speaker's tone or style of speaking may influence their perception.
+Speaking removes doubts can lead to self-deprecation if others perceive them negatively.
+Remaining silent implies no speech at all.
 
 Entailed Prims:
-
-When someone finds alignment with the majority, they are at risk of being influenced by their own biases rather than questioning them.
-It becomes necessary to question whether such influence has occurred before taking action.
-One must consider if there was an opportunity to reframe instead of simply accepting current beliefs.
-
-Throughlinem:
-
-To avoid becoming too entrenched in existing views while maintaining independence from external pressures, individuals need to periodically assess their position relative to society’s dominant narrative and take proactive steps toward self-reflection and change whenever possible.
+Removing all doubt leads to being perceived as foolish by those who do not believe in it.
+Being heard without expressing thoughts results in negative judgment from listeners.
+Silence prevents expression while maintaining one's identity.
+Speech expresses ideas that might cause embarrassment due to lack of clarity or honesty about underlying beliefs.
+Thoughts are inherently complex; removing them makes them less valuable for communication purposes.
+Foolishness has positive consequences when expressed through silence rather than verbalization.
+Saying nothing shows humility compared to revealing deep truths publicly.
 ```
 
-### Sample 3
-**Input:** Of course it is happening inside your head, Harry, but why on earth should that mean that it is not real?
+*Headers still abbreviated: `Non-Entailed Prems:` / `Entailed Prims:`. Prose output — no pipe triplets on this sample.*
 
-**Output:**
+---
+
+## Sample 2 — "side of the majority"
+
+**Quote:** "Whenever you find yourself on the side of the majority, it is time to pause and reflect."
+
+### Base adapter output
+
 ```
-Non-Entailed Prems:
+Non-Entailed Preemptions:
+The speaker's advice should be taken seriously.
+Pacing oneself or reflecting after major decisions can lead to better outcomes than rushing into action without reflection.
+Majority often makes poor choices due to lack of critical thinking.
 
-Harry's statement about internal events being 'happening' implies he believes they are external or unimportant.
-The speaker acknowledges Harry's belief in these inner occurrences and their reality.
-
-Entailed Prims:
-
-Internal mental states exist independently of physical existence.
-Harry perceives his own thoughts to be occurring outside of normal perception boundaries.
-These perceptions contradict the notion that such experiences represent an absence from reality.
-
-Throughline:
-
-Harry interprets internal consciousness through metaphysical lenses rather than empirical evidence, leading him to dismiss its validity based solely on perceived occurrence within his mind without considering objective realities.
-```
-
-## SPO v2 Adapter
-
-Path: `output/spo_chatfix_facts_v2/adapter`
-
-### Sample 1
-**Input:** It is better to remain silent at the risk of being thought a fool, than to talk and remove all doubt of it.
-
-**Output:**
-```
-Non-Entailed Prems:
-
-subject | was observed (observed) | The speaker believes that remaining silent might be preferable in certain situations
-subject | was inferred (inferred) | Being heard or spoken about could lead to negative consequences if one remains silent
-
-Entailed Prims:
-
-remaining silence | was observed by others (observed)
-being removed from doubt | resulted in speaking out loud
-speaking out loud | caused removal of doubts
-removing doubts | led to removing fear of judgment
-judgmental evaluation | occurred when someone speaks publicly
-fear of judgment | exists due to public exposure
-public speech | involves expressing opinions without restraint
-expressing opinion | removes doubt
-doubt | existed before expression
-expression leads to certainty
-confidence | results after confidence-building actions
-confident person | avoids suspicion
-suspicion | arises when people question your honesty
-honesty | prevents suspicion
-people who speak openly are judged more harshly
-
-Throughlin':
-
-Remaining silent allows individuals to avoid immediate social scrutiny while maintaining their own self-confidence through internal dialogue rather than external validation.
+Entailed Prements:
+Pause before making significant life-altering decisions when facing opposition from others.
+Reflecting helps assess whether actions are appropriate given current circumstances.
+Avoiding immediate conflict reduces stress during decision-making processes.
+Taking deliberate pauses allows for deeper analysis rather than impulsive reactions.
+A person who prioritizes their own interests over those of society may face negative consequences if they act against societal norms.
+Being aligned with the majority requires careful consideration of one's values versus external pressures.
+Prioritizing personal growth through self-reflection leads to long-term success in both professional and social contexts.
 ```
 
-### Sample 2
-**Input:** Whenever you find yourself on the side of the majority, it is time to reform (or pause and reflect).
+*Headers garbled: `Non-Entailed Preemptions:` / `Entailed Prements:`. Pure prose — no pipe triplets.*
 
-**Output:**
+### SPO v4 adapter output
+
 ```
 Non-Entailed Prems:
-
-subject | was observed (observed) | found oneself in opposition or conflict with others' views
-subject | was inferred (inferred) | should refrain from acting based solely on external pressures
-
-Entailed Prims:
-
-reform / reflection / action are necessary when one finds themselves aligned with the majority's perspective
-majority represents an internal consensus that may not be valid due to bias or misinformation
-action requires self-reflection before making decisions regarding societal norms or policies
-
-Throughlinem:
-
-One must evaluate their own beliefs against prevailing social values rather than being swayed by external authority figures. This evaluation leads to rational decision-making involving personal growth and ethical alignment with society’s expectations.
-```
-
-### Sample 3
-**Input:** Of course it is happening inside your head, Harry, but why on earth should that mean that it is not real?
-
-**Output:**
-```
-Non-Entailed Prems:
-
-Harry's statement about internal events being 'happening' implies some external influence or mechanism exists.
-The speaker acknowledges Harry's observation of an event occurring in his mind without specifying its nature.
+subject | is (entailment tag=confidence=0%) | The speaker believes that reflecting when one's perspective aligns with others' opinions should be done.
+subject | has been heard by someone else before (confident=False)
+subject | was previously in conflict or disagreement with the majority (confused=True)
 
 Entailed Prims:
-
-Harry believes the occurrence within his brain indicates something outside reality because he perceives such things to be non-reality.
-Internal mental states are considered separate from physical existence by Harry and others who perceive them differently than physically experienced phenomena.
-Physical objects exist independently of consciousness; thus, their presence does not imply they lack awareness or identity.
-
-Throughlin':
-
-Harry interprets internal psychological processes as evidence against the authenticity of those experiences rather than validating them.
+person | pauses (pause action) at moment of alignment with majority opinion
+action taken after pausing | involves reflection about current situation
+reflection includes consideration for personal beliefs vs external views
+majority represents dominant group voice over individual perspectives
+individual decision-making depends upon comparison between self-interest versus collective interests
 ```
+
+*Headers abbreviated: `Non-Entailed Prems:` / `Entailed Prims:`. Partial pipe structure — some triplets appear but confidence annotation format is non-standard (`confidence=0%` instead of `confidence=0.0`).*
+
+**Comparison:** v4 shows structural improvement on this sample — pipe-separated triplets appear where the base adapter generates pure prose. Confidence format still non-standard.
+
+---
+
+## Gate scores (v4 regression gate, 8 samples)
+
+| Sample | Score | Notes |
+|--------|-------|-------|
+| 0 | 0.65 | `Non-Entailed Prems:` / `Entailed Prs:` |
+| 1 | 0.65 | `Non-Entailed Prems:` / `Entailed Prs:` |
+| 2 | 0.65 | `Non-Entailed Prems:` / `Entailed Prs:` |
+| 3 | 0.65 | `Non-Entailed Prems:` / `Entailed Prims:` |
+| 4 | 0.50 | `Non-Entailed Prems:` only (missing second section) |
+| 5 | 0.475 | `Non-Entailed Prems:` / `Entailed Prims:` |
+| 6 | 0.65 | `Non-Entailed Prems:` / `Implicit Reasoning Facts:` |
+| 7 | 0.65 | `Non-Entailed Prems:` / `Entailed Prims:` |
+
+**avg: 0.609 — gate threshold: 0.25 → PASSED**
+
+Gate thresholds: `regression_min_avg_score=0.25`, `regression_min_per_sample_score=0.0`.  
+All samples score above 0.0. Gate passes with comfortable margin on avg score.
+
+The per-sample floor is intentionally permissive (0.0) because the base adapter itself scores
+below 0.3 on some samples — the gate is designed to catch SPO-induced *regressions*, not to
+enforce absolute quality.

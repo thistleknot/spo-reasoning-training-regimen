@@ -406,9 +406,19 @@ This is the most insidious bug. When `compute_step()` evaluates gold `output_tex
 
 **Fix:** Pre-score each training sample *before* the training loop using data-quality signals that are independent of format compliance: unique-premises ratio, mean predicate specificity, and subject dominance ratio. Embed these scores as `precomputed_reward` in the training batch and use them in `compute_step()` instead of live evaluation. This separates reward differentiation (done offline at dataset construction time) from reward evaluation (which is inherently circular when gold data is both input and ground truth).
 
+### 4. SPO-as-weighted-SFT cannot fix pre-trained abbreviation habits
+
+After 5 epochs on 967 records, the adapter still outputs `Non-Entailed Prems:` and `Entailed Prims:` instead of the full header names from the training corpus. Every training record has the correct full names; SPO is applied on top; the model ignores the correction anyway.
+
+The reason is architectural: SPO as implemented here is **offline weighted SFT**. `compute_step()` upweights loss on high-quality gold tokens and downweights loss on lower-quality ones. It never generates a bad output at training time and penalises it. The base model's abbreviation tendency — reinforced by Qwen pre-training — wins because it is never directly penalised in the gradient signal.
+
+**Fix (future):** Use online RL (GRPO or PPO). Generate a candidate output, score it with `evaluate_triplet_correctness`, compute a reward signal, and backpropagate through the actual generated tokens. This is the only training loop that can penalise a garbled header that the model chose to produce.
+
+**Short-term mitigation:** Constrained decoding (prefix forcing) or a few-shot prefix in the inference prompt that starts the output with the correct headers (`Non-Entailed Premises:\n`) can force correct headers at generation time without retraining.
+
 ### Takeaway
 
-For any RL-from-feedback training loop: (1) generation controls must prevent degenerate outputs before rewards are ever computed, (2) reward functions must explicitly penalise known failure modes rather than only rewarding the ideal case, and (3) reward signals computed from gold data are always suspect — check that the distribution of rewards across your training set actually varies before assuming SPO is doing anything useful.
+For any RL-from-feedback training loop: (1) generation controls must prevent degenerate outputs before rewards are ever computed, (2) reward functions must explicitly penalise known failure modes rather than only rewarding the ideal case, (3) reward signals computed from gold data are always suspect — check that the distribution of rewards across your training set actually varies before assuming SPO is doing anything useful, and (4) offline preference optimisation cannot correct a habit the model has never been penalised for producing — if the failure mode is a specific generated token sequence, only online generation-and-penalise RL can reliably fix it.
 
 ---
 

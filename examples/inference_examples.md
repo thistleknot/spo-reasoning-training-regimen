@@ -1,7 +1,7 @@
 # Inference Examples — Stratified Multi-Regimen Adapter
 
-Generated: 2026-05-05 20:51  
-Adapter: `output/stratified_multireg_v2/base-plus-facts/adapter`  
+Generated: 2026-05-06 06:29  
+Adapter: `output/stratified_multireg_v3/base-plus-facts/adapter`  
 Inference config: `no_repeat_ngram_size=6`, `max_new_tokens=384`, greedy decode, chat-template wrapped  
 Note: `repetition_penalty` omitted — penalises header tokens that appear in the prompt instruction list.
 
@@ -21,16 +21,16 @@ Note: `repetition_penalty` omitted — penalises header tokens that appear in th
 ```
 Non-Entailed Premises:
 everyone else | is (observed) | already taken
-everyone else | is (inferred) | is not yourself
-everyone else | is not (observed) | taken
+everyone else | is (inferred) | not taken
+everyone else | has (observed) | taken
 
 Entailed Premises:
-be yourself | is (inferred/observed) | is the correct action
-everyone else | is already (observed) | is taken
-everyone else | has (observed) | been taken
+be yourself | is (inferred/observed) | the correct action
+everyone else | is already (observed) | not taken
+be yourself | is (observed/observed) | a recommendation
 
 Throughline:
-The speaker advises against conforming to others' expectations because they are already taken by others.
+Self-acceptance is the correct and necessary action for others to be taken.
 ```
 
 ---
@@ -45,22 +45,19 @@ The speaker advises against conforming to others' expectations because they are 
 
 ```
 Non-Entailed Premises:
-subject | is (observed) | the speaker is selfish
-subject | is (observing) | the speaker is impatient
-subject | is (inferred) | the speaker is insecure
-subject | is (is) | the speaker is out of control
-subject | is (implied) | the speaker is hard to handle
+I | is (observed) | make mistakes
+I | is (observers) | out of control
+I | is (inferred) | hard to handle at times
+I | is (impatient) | a little insecure
 
 Entailed Premises:
-speaker | is (inferred/observed) | the best is not deserved if you can't handle the worst
-speaker | is (inverted) | the worst is not deserved if you cannot handle the best
-speaker | is (observed/observed) | makes mistakes
-speaker | is (is) (observed) | at times hard to handle
-speaker | is (implied/observed) | is out of control
-speaker | is (obscured) | is selfish
+If you can't handle me (I) at your worst, then you sure (observed) | don't deserve me (I) at my best
+I | is (impatient) | a little insecure
+I | is (selfish) | selfish
+I | is (out of control) | out of control
 
 Throughline:
-The speaker's best is not deserved if they cannot handle their worst.
+The speaker is characterized by selfishness, impatience, and insecurity, which are detrimental to their ability to be respected by others.
 ```
 
 ---
@@ -75,14 +72,23 @@ The speaker's best is not deserved if they cannot handle their worst.
 
 ```
 Non-Entailed Premises:
-books | are (observed) | physical objects
-soul | is (observed) | a concept
-body | is (observed)
+books | is (observed) | are physical objects
+soul | is (observed/observed) | a concept
+body | is (observed/) | a physical entity
+room | is (observed/)
+room | is (observing) | a space
 
 Entailed Premises:
-a room | is (observed as a container) | without books
-a body | is (observed in the container) | without soul
-room | is (observed without books) | like a body without soul
+room | is (observes) | a space
+room | is (inferred) | lacks soul
+room | is (is) | lacks soul
+books | is (observes/) | are physical objects
+room | is (has) | soul
+room | is not (observes) | without soul
+room | is like (observes) | body without soul
+body | is (inferred/) | soul
+room | lacks soul | implies (inferred) | soul
+room without books | is like (observed) | body without soul
 
 Throughline:
 A room without books is analogous to a body without a soul.
@@ -100,20 +106,26 @@ A room without books is analogous to a body without a soul.
 
 ```
 Non-Entailed Premises:
-Matters | is (inferred) | are not the same as minds
-Matters | is (observed) | are not the subject of the quote
-Mind | is (observed/observed) | is a separate entity from matters
-Matters | is a (observed) | state of being
+Matters | is (observed) | are not the same as mind
+Matters | is (inferred) | are not the subject of the quote
+Mind | is (observed/observed) | is a separate entity from matter
+Matters | is a (observed) | verb
+Mind | is (inferred/observed) | does not matter
+Matters | does not matter | (observed/observing) | are not the subjects of the quote
 
 Entailed Premises:
-Mindless | is (inferred/observed) | do not matter
-Matters | is the (observed) | subject of the quote
-Matters | is characterized by (observed) | being who they are
-Mindless | is characterized by (inferred) | not caring about others
 Mindless | is (observed/inferred) | do not matter
+Matters (subject) | is (observed/) | do not matter
+Mindless | is (inferred/) | do not mind
+Mindless | is a (observing) | state
+Mindless | is not (observed/) | a state of being
+Mindless | is the opposite of (observed/) | being
+Mindless | does not matter | is (observed/)
+Mindless | is (opposite of) (observed/) | matter
+Mindless | does (observed/) | not mind
 
 Throughline:
-Matters are characterized by being who they are and expressing their feelings, while mindless individuals do not care about others.
+Mindless individuals do not matter because they lack the ability to perceive or feel their own identity or the desire to express it.
 ```
 
 ---
@@ -132,15 +144,16 @@ Matters are characterized by being who they are and expressing their feelings, w
 Non-Entailed Premises:
 everyone else | is (observed, confidence=1.0) | already taken
 everyone else | is (inferred, confidence=0.5) | not yourself
-everyone else | is not (observed, confidence=X) | already taken
+everyone else | is not (observed, confidence-1.0) | self-aware
 
 Entailed Premises:
-be yourself | is (observed) | the correct action
-everyone else | is already taken | is (observed)
-everyone else | is (opposite of) yourself | is (observing, confidence=1.5) | already taken
+self-awareness | is (observed) | a characteristic of being yourself
+everyone else | has (observed) | already taken
+being yourself | is (observed and inferred) | a characteristic of self-awareness
+being yourself | is a (observed and inferred fact) | characteristic of self-awareness
 
 Throughline:
-The correct action is to be yourself, as others are not.
+Being yourself is a necessary condition for one to be taken by others.
 ```
 
 ---
@@ -156,16 +169,16 @@ The correct action is to be yourself, as others are not.
 ```
 Non-Entailed Premises:
 I | is (observed, confidence=1.0) | make mistakes
-I | is (observing, confidence=1.5) | am out of control
-I | is (inferred, confidence=0.5) | is hard to handle at times
-I | is (is (observed, confidence-1.0) | selfish
-I | is (inspired, confidence=0.75) | impatient
+I | is (observing, confidence=1.5) | out of control
+I | is (inferred, confidence=0.5) | hard to handle at my worst
+I | is (is, confidence=1.2) | insecure
 
 Entailed Premises:
-If you can't handle me (subject) at your worst, then you sure (subject) don't deserve me (subject) at my best.
-I | is (observers, confidence=1.25) | make mistakes
-You | is (observers) | can't handle me (observer) at your worst
-You | is (inferred) | don't deserve me (observer) at my best
+If you can't handle me (I) at your worst, then you sure (observing, confidence=-1.0) as not deserving (I) at your best
+I | is (inspired, confidence=0.8) | make mistakes
+You | is (observing) | can't handle me at your worst
+You | is (inferred) | don't deserve me at your best
+You | is (inspired) | can't handle I at your worst
 
 Throughline:
 The speaker's behavior is characterized by selfishness, impatience, insecurity, and vulnerability, which makes them difficult to handle.
@@ -183,19 +196,17 @@ The speaker's behavior is characterized by selfishness, impatience, insecurity, 
 
 ```
 Non-Entailed Premises:
-books | are (observed, confidence=1.0) | physical objects
-soul | is (observed, confidence=X) | a concept
-body | is (observed) | a physical entity
+books | is (observed, confidence=1.0) | are physical objects
+soul | is (observed) | a concept
 room | is (observed)
 
 Entailed Premises:
-a room without books | is (observed with confidence=1.0)
-a body without soul | is (observed)
-books | are (observing, confidence=1.5) | physical objects
-room | is (inferred, confidence=0.5) | a body without soul
+room | is (inferred, confidence=0.5) | lacks soul
+room | is (inverted, confidence=0.3) | lacks soul
+books | is (inferred) | are physical objects
 
 Throughline:
-A room without books is a body without soul.
+A room without books lacks soul.
 ```
 
 ---
@@ -210,22 +221,18 @@ A room without books is a body without soul.
 
 ```
 Non-Entailed Premises:
-Matters | is (inferred, confidence=0.5) | are not the same as mind
-Matters | is (observed, confidence=1.0) | do not mind
-Mind | is (inferred) | is not the same as matter
-Mind | is (observed) | is not the thing
+Matters | is (observed, confidence=1.0) | are those who matter
+Matters | is (inferred, confidence=0.5) | do not mind
+Matters | is a (observed, confidence=X) | category
+Matters | is not (observed, confidence=Y) | a category
 
 Entailed Premises:
-Speaking | is (inferred from quote) | is important
-Speaking | is (observed as a fact) | is important
-Matters | is a (observed) | group of people
-Mind | is (obscured) | is not the main focus of the quote
-Matters | is not (observed) | the same as mind
-Speaking | is (inverted) | is the main focus of the statement
-Speaking | is (obscure) | is not the focus of the statement
+Mindlessness | is (observed) | a state of not caring about others
+Matters | is the (observed) | state of caring about others
+Minding | is (observed as a state) | a state of caring about others
 
 Throughline:
-Speaking is the main focus of a statement, and it is important to speak who you are and what you feel.
+Minding is a state of not caring, and those who matter are those who care.
 ```
 
 ---

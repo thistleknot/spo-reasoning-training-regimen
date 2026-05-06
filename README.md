@@ -408,6 +408,7 @@ This is the most insidious bug. When `compute_step()` evaluates gold `output_tex
 
 ### 4. SPO-as-weighted-SFT cannot fix pre-trained abbreviation habits
 
+
 After 5 epochs on 967 records, the adapter still outputs `Non-Entailed Prems:` and `Entailed Prims:` instead of the full header names from the training corpus. Every training record has the correct full names; SPO is applied on top; the model ignores the correction anyway.
 
 The reason is architectural: SPO as implemented here is **offline weighted SFT**. `compute_step()` upweights loss on high-quality gold tokens and downweights loss on lower-quality ones. It never generates a bad output at training time and penalises it. The base model's abbreviation tendency — reinforced by Qwen pre-training — wins because it is never directly penalised in the gradient signal.
@@ -416,9 +417,30 @@ The reason is architectural: SPO as implemented here is **offline weighted SFT**
 
 **Short-term mitigation:** Constrained decoding (prefix forcing) or a few-shot prefix in the inference prompt that starts the output with the correct headers (`Non-Entailed Premises:\n`) can force correct headers at generation time without retraining.
 
+### 5. For small models, the adapter IS the routing signal — don't fight it with prompts
+
+Single-regimen training on the facts format produced clean, full-length headers throughout. Once training was extended to a second regimen sharing the same semantic domain (logical entailment reasoning), headers degraded to abbreviations (`Entailed Prims:`, `Non-Entailed Prems:`). The original single-regimen training was fine; the problem was introduced entirely by combining regimens.
+
+**Mechanism:** Both regimens use nearly identical header vocabulary ("Entailed Premises:", "Non-Entailed Premises:"). When trained jointly, the gradients from each regimen are co-aligned but not identical — they point at the same token neighborhood with slightly different downstream structure expectations. The model converges to a weighted average over that neighborhood, and the base model's pre-training bias toward abbreviated forms (which were never fully suppressed, just outvoted by the single-regimen signal) re-emerges as the dominant pattern.
+
+**Why text prompts cannot solve this:** A text tag like `[FACTS]` occupies the same embedding space as all other vocabulary. For a 0.6B parameter model, learning a clean conditional `[FACTS] → full header names` is infeasible when the tag is semantically adjacent to the content tokens and the regimens share near-identical output vocabulary. This is scale-dependent: larger models (7B+) can learn such conditionals from text prompts alone; small models cannot.
+
+**Why special tokens are also wrong:** Special tokens require downstream users to inject a model-internal routing token they have no natural reason to know about. This creates a hidden contract — the model silently degrades for any user who doesn't know the required prefix. It's bad API design disguised as a training fix.
+
+**The correct architecture:** For a small model serving multiple structurally distinct output formats, the routing mechanism belongs in the **weight space, not the prompt**. Train a separate LoRA adapter per regimen. The adapter encodes the format; the prompt encodes the content. Downstream users interact with natural language prompts, and the operator selects the right adapter at deploy time. No hidden tokens, no prompt engineering required from the user side.
+
+```
+adapter_facts/   ← load when you want 2-section entailment output
+adapter_base/    ← load when you want 3-section output with throughline
+```
+
+2× adapter storage (a few MB each) is the only cost. Gradient conflict is eliminated by construction.
+
+**Short-term mitigation (no retraining):** Constrained decoding — use a `LogitsProcessor` to hard-constrain the first K tokens to the correct header sequence. The model generates the right headers without retraining or special tokens in the prompt.
+
 ### Takeaway
 
-For any RL-from-feedback training loop: (1) generation controls must prevent degenerate outputs before rewards are ever computed, (2) reward functions must explicitly penalise known failure modes rather than only rewarding the ideal case, (3) reward signals computed from gold data are always suspect — check that the distribution of rewards across your training set actually varies before assuming SPO is doing anything useful, and (4) offline preference optimisation cannot correct a habit the model has never been penalised for producing — if the failure mode is a specific generated token sequence, only online generation-and-penalise RL can reliably fix it.
+For any RL-from-feedback training loop: (1) generation controls must prevent degenerate outputs before rewards are ever computed, (2) reward functions must explicitly penalise known failure modes rather than only rewarding the ideal case, (3) reward signals computed from gold data are always suspect — check that the distribution of rewards across your training set actually varies before assuming SPO is doing anything useful, (4) offline preference optimisation cannot correct a habit the model has never been penalised for producing — if the failure mode is a specific generated token sequence, only online generation-and-penalise RL can reliably fix it, and (5) for small models, multi-regimen training on semantically overlapping formats is the wrong architecture — separate adapters per regimen eliminate gradient conflict and preserve clean natural-language prompts for downstream users.
 
 ---
 

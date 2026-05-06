@@ -1,154 +1,246 @@
-# Inference Examples — SPO v4 Sniff Test
+# Inference Examples — Stratified Multi-Regimen Adapter
 
-Generated from: sniff test run against `output/spo_chatfix_facts_v4/adapter`  
-Adapter: `output/spo_chatfix_facts_v4/adapter`  
-Base adapter: `output/ablations_chatfix_baseonly/base-only/adapter`
-
-**Regression gate result (v4):** PASSED — avg score 0.61 (threshold 0.25), all 8 samples ≥ 0.0  
-**Inference config:** `repetition_penalty=1.3`, `no_repeat_ngram_size=4`, `max_new_tokens=300`, greedy decode
+Generated: 2026-05-05 19:42  
+Adapter: `output/stratified_multireg/base-plus-facts/adapter`  
+Inference config: `no_repeat_ngram_size=6`, `max_new_tokens=384`, greedy decode, chat-template wrapped  
+Note: `repetition_penalty` omitted — penalises header tokens that appear in the prompt instruction list.
 
 ---
 
-> **Note on header quality:** Both base and v4 adapters still produce abbreviated section headers
-> (`Non-Entailed Prems:` instead of `Non-Entailed Premises:`). This is a known pre-existing
-> limitation of the base adapter that SPO-as-weighted-SFT cannot override. See Lessons Learned
-> in `README.md` for the full explanation.
+## BASE REASONING regimen
+
+## Sample 1 — BASE REASONING
+
+**Quote:** "Be yourself; everyone else is already taken."
+
+**Header score:** 1.00 ✓ PASS  
+**First header:** `Non-Entailed Premises:`
+
+### Output
+
+```
+Non-Entailed Premises:
+everyone else | is (observed) | already taken
+everyone else | is (inferred) | is not yourself
+everyone else | is not (observed) | taken
+
+Entailed Premises:
+be yourself | is (observed/observed) | is the correct action
+everyone else | is already (observed/observing) | taken
+everyone else | has (observed/observers) | already taken
+
+Throughline:
+The speaker believes that others are not themselves, and thus they should be.
+```
 
 ---
+## Sample 2 — BASE REASONING
 
-## Prompt format used
+**Quote:** "I'm selfish, impatient and a little insecure. I make mistakes, I am out of control and at times hard to handle. But if you can't handle me at my worst, then you sure as hell don't deserve me at my best."
+
+**Header score:** 1.00 ✓ PASS  
+**First header:** `Non-Entailed Premises:`
+
+### Output
 
 ```
-Given this quote, extract the implicit reasoning facts.
+Non-Entailed Premises:
+subject | is (observed) | the speaker is selfish
+subject | is (observing) | the speaker is impatient
+subject | is (inferred) | the speaker is insecure
+subject | is (obscured) | the speaker is out of control
+subject | is (implied) | the speaker is hard to handle
 
-Quote: "<quote>"
+Entailed Premises:
+the speaker | is (observed/observed) | makes mistakes
+the speaker | is (inferred/observed) | is out of control at times
+the speaker | is a (observed/observing) | little insecure
+the speaker | is out of control (observed/observers) | at times
+the speaker's best is (observed/observer) | not deserving of the listener's respect
+the listener | is (observed/inferred) | can't handle the speaker at their worst
+the speaker | is selfish (observed/observes) | at their worst
 
-Generate a response with:
-1. Non-Entailed Premises
-2. Entailed Premises
-
-Format each premise as: subject | relation (tag, confidence=X) | object
+Throughline:
+The speaker's negative traits (selfishness, impatience, insecurity, out-of-control behavior, and difficulty handling) are detrimental to the listener's respect for the speaker's positive traits (best).
 ```
-
-The prompt is parsed by `PromptContract.from_prompt()` which derives expected section headers
-`['Non-Entailed Premises:', 'Entailed Premises:']`. Both adapters still produce abbreviated variants
-(`Non-Entailed Prems:`, `Entailed Prims:`) — see Lesson 4 in README.md.
 
 ---
+## Sample 3 — BASE REASONING
 
-## Sample 1 — "remain silent and be thought a fool"
+**Quote:** "A room without books is like a body without a soul."
 
-**Quote:** "It is better to remain silent and be thought a fool than to speak and remove all doubt."
+**Header score:** 1.00 ✓ PASS  
+**First header:** `Non-Entailed Premises:`
 
-### Base adapter output
-
-```
-Non-Entailed Preemptions:
-The speaker's tone or attitude towards others may not have been explicitly stated.
-Remaining silent could imply being unresponsive rather than foolishness.
-
-Entailed Premisses:
-Being removed from doubt by speaking leads to self-deprecation due to perceived failure in remaining silent.
-Speaking without removing doubts causes embarrassment because one might believe they are ignorant of their own ignorance.
-Silence allows for greater freedom compared to speech that removes doubt.
-Speech alone does not eliminate fear; it only reduces its impact on judgment if spoken aloud.
-Removing all doubt through silence prevents further negative consequences related to speaking.
-Saying nothing about your current state can prevent you from becoming an example of someone who speaks loudest when there's no need to do so.
-Avoiding public expression while maintaining internal clarity avoids unnecessary exposure during conversations where such expressions would cause discomfort.
-Spoken words should always include acknowledgment of uncertainty before asserting certainty.
-There exists a moral obligation to avoid expressing oneself publicly unless absolutely necessary.
-Publicly sharing personal struggles often results in social isolation or rejection.
-Fear of appearing stupid outweighs any benefit gained from avoiding criticism.
-```
-
-*Headers garbled: `Non-Entailed Preemptions:` / `Entailed Premisses:`. Pure prose — no pipe triplets.*
-
-### SPO v4 adapter output
+### Output
 
 ```
-Non-Entailed Prems:
-The speaker's tone or style of speaking may influence their perception.
-Speaking removes doubts can lead to self-deprecation if others perceive them negatively.
-Remaining silent implies no speech at all.
+Non-Entailed Premises:
+books | are (observed) | physical objects
+soul | is (observed) | a concept
+room | is (observed)
 
-Entailed Prims:
-Removing all doubt leads to being perceived as foolish by those who do not believe in it.
-Being heard without expressing thoughts results in negative judgment from listeners.
-Silence prevents expression while maintaining one's identity.
-Speech expresses ideas that might cause embarrassment due to lack of clarity or honesty about underlying beliefs.
-Thoughts are inherently complex; removing them makes them less valuable for communication purposes.
-Foolishness has positive consequences when expressed through silence rather than verbalization.
-Saying nothing shows humility compared to revealing deep truths publicly.
+Entailed Premises:
+room | is (observing) | a body
+body | is (observing)
+room | is (observers) | a body
+room | is (inferred) | lacks soul
+body | is (inferred)
+room | is (inference) | lacks soul
+room | is (observation) | a body
+soul | is a (observed) concept
+body | is (observation) without soul
+
+Throughline:
+A room without books lacks a soul.
 ```
-
-*Headers still abbreviated: `Non-Entailed Prems:` / `Entailed Prims:`. Prose output — no pipe triplets on this sample.*
 
 ---
+## Sample 4 — BASE REASONING
 
-## Sample 2 — "side of the majority"
+**Quote:** "Be who you are and say what you feel, because those who mind don't matter, and those who matter don't mind."
 
-**Quote:** "Whenever you find yourself on the side of the majority, it is time to pause and reflect."
+**Header score:** 1.00 ✓ PASS  
+**First header:** `Non-Entailed Premises:`
 
-### Base adapter output
-
-```
-Non-Entailed Preemptions:
-The speaker's advice should be taken seriously.
-Pacing oneself or reflecting after major decisions can lead to better outcomes than rushing into action without reflection.
-Majority often makes poor choices due to lack of critical thinking.
-
-Entailed Prements:
-Pause before making significant life-altering decisions when facing opposition from others.
-Reflecting helps assess whether actions are appropriate given current circumstances.
-Avoiding immediate conflict reduces stress during decision-making processes.
-Taking deliberate pauses allows for deeper analysis rather than impulsive reactions.
-A person who prioritizes their own interests over those of society may face negative consequences if they act against societal norms.
-Being aligned with the majority requires careful consideration of one's values versus external pressures.
-Prioritizing personal growth through self-reflection leads to long-term success in both professional and social contexts.
-```
-
-*Headers garbled: `Non-Entailed Preemptions:` / `Entailed Prements:`. Pure prose — no pipe triplets.*
-
-### SPO v4 adapter output
+### Output
 
 ```
-Non-Entailed Prems:
-subject | is (entailment tag=confidence=0%) | The speaker believes that reflecting when one's perspective aligns with others' opinions should be done.
-subject | has been heard by someone else before (confident=False)
-subject | was previously in conflict or disagreement with the majority (confused=True)
+Non-Entailed Premises:
+Matters | is (inferred) | are not the same as minds
+Matters | is (observed) | are not the subject of the quote
+Minds | is (observed)
 
-Entailed Prims:
-person | pauses (pause action) at moment of alignment with majority opinion
-action taken after pausing | involves reflection about current situation
-reflection includes consideration for personal beliefs vs external views
-majority represents dominant group voice over individual perspectives
-individual decision-making depends upon comparison between self-interest versus collective interests
+Entailed Premises:
+Mindless | is (inferred)
+Matters | is (obscured) | are not the subjects of the quote
+Matters | is a (observed) | state of being
+Minds | is a (observers) | state of being
+
+Throughline:
+Matters are states of being, and those who matter do not mind, while those who mind do not matter.
 ```
-
-*Headers abbreviated: `Non-Entailed Prems:` / `Entailed Prims:`. Partial pipe structure — some triplets appear but confidence annotation format is non-standard (`confidence=0%` instead of `confidence=0.0`).*
-
-**Comparison:** v4 shows structural improvement on this sample — pipe-separated triplets appear where the base adapter generates pure prose. Confidence format still non-standard.
 
 ---
+## FACTS regimen
 
-## Gate scores (v4 regression gate, 8 samples)
+## Sample 5 — FACTS
 
-| Sample | Score | Notes |
-|--------|-------|-------|
-| 0 | 0.65 | `Non-Entailed Prems:` / `Entailed Prs:` |
-| 1 | 0.65 | `Non-Entailed Prems:` / `Entailed Prs:` |
-| 2 | 0.65 | `Non-Entailed Prems:` / `Entailed Prs:` |
-| 3 | 0.65 | `Non-Entailed Prems:` / `Entailed Prims:` |
-| 4 | 0.50 | `Non-Entailed Prems:` only (missing second section) |
-| 5 | 0.475 | `Non-Entailed Prems:` / `Entailed Prims:` |
-| 6 | 0.65 | `Non-Entailed Prems:` / `Implicit Reasoning Facts:` |
-| 7 | 0.65 | `Non-Entailed Prems:` / `Entailed Prims:` |
+**Quote:** "Be yourself; everyone else is already taken."
 
-**avg: 0.609 — gate threshold: 0.25 → PASSED**
+**Header score:** 1.00 ✓ PASS  
+**First header:** `Non-Entailed Premises:`
 
-Gate thresholds: `regression_min_avg_score=0.25`, `regression_min_per_sample_score=0.0`.  
-All samples score above 0.0. Gate passes with comfortable margin on avg score.
+### Output
 
-The per-sample floor is intentionally permissive (0.0) because the base adapter itself scores
-below 0.3 on some samples — the gate is designed to catch SPO-induced *regressions*, not to
-enforce absolute quality.
+```
+Non-Entailed Premises:
+everyone else | is (observed, confidence=1.0) | already taken
+everyone else | is (inferred, confidence=0.5) | not yourself
+everyone else | is not (observed, confidence=-1.0) | yourself
+
+Entailed Premises:
+be yourself | is (observed) | the correct action
+everyone else | is already taken | is (observed)
+everyone else | is (opposite of) yourself | is (observing)
+```
+
+---
+## Sample 6 — FACTS
+
+**Quote:** "I'm selfish, impatient and a little insecure. I make mistakes, I am out of control and at times hard to handle. But if you can't handle me at my worst, then you sure as hell don't deserve me at my best."
+
+**Header score:** 1.00 ✓ PASS  
+**First header:** `Non-Entailed Premises:`
+
+### Output
+
+```
+Non-Entailed Premises:
+subject | is (inferred, confidence=0.5) | The speaker is a person who is out of control at their worst.
+subject | is (inverted, confidence=0.3) | The speaker is at times hard to handle.
+subject | is (observed, confidence=1.0) | The speaker makes mistakes.
+
+Entailed Premises:
+Subject | is (observed) | The speaker is selfish.
+Subject | is (obsured) | The speaker is impatient.
+Subject | is (inferred) | The speaker is insecure.
+Subject | is (obseved) | The speaker is out of control.
+Subject | is (is) | The speaker is hard to handle.
+Subject | is (opposite) | If you can't handle me (the worst version) at your best, then you sure as heck don't deserve me (the best version).
+```
+
+---
+## Sample 7 — FACTS
+
+**Quote:** "A room without books is like a body without a soul."
+
+**Header score:** 1.00 ✓ PASS  
+**First header:** `Non-Entailed Premises:`
+
+### Output
+
+```
+Non-Entailed Premises:
+books | are (observed, confidence=1.0) | physical objects
+soul | is (observed, confidence=X) | a concept
+room | is (observed) | a physical space
+body | is (observed)
+
+Entailed Premises:
+room | is (inferred, confidence=0.5) | lacks soul
+soul | is a (observed, confidence-X) | concept
+room | is a (observing, confidence=1.5) | body
+books | is (observed as a (observing, confident=1.5) physical object)
+```
+
+---
+## Sample 8 — FACTS
+
+**Quote:** "Be who you are and say what you feel, because those who mind don't matter, and those who matter don't mind."
+
+**Header score:** 1.00 ✓ PASS  
+**First header:** `Non-Entailed Premises:`
+
+### Output
+
+```
+Non-Entailed Premises:
+Matters | is (inferred, confidence=0.5) | are not the same as minds
+Matters | is (observed, confidence=1.0) | are not the subject of the quote
+Mind | is (inferred) | is a separate entity from matter
+Matters | is a (observed, confidence-1.0) | state of being
+
+Entailed Premises:
+Speaking | is (observed) | is a form of expression
+Speaking | is (inferred from the quote) | is a way to express one's identity
+Speaking | is (observing) | is a form that matters
+Speaking | is (obscured) | is a form without being subject to the mind
+Speaking | is (implied) | is a form with identity
+Speaking | is a (observing) | state of being
+Speaking | is (opposite of) mind
+Speaking | is a form of (observing) | expression
+Speaking | is a way to (observing) | express one's identity
+Mind | is (observed as a separate entity) | is not the same as speaking
+Mind | is (opposite) | speaking
+Speaking | is (expressing) | identity
+Speaking | is the (observing) | act of saying
+Speaking | is (explanatory) | the act of expressing one's identity
+Speaking is (observing) the act of saying
+```
+
+---
+## Gate summary
+
+| Regimen | Sample | Header Score | Gate |
+|---------|--------|-------------|------|
+| BASE | 1 | 1.00 | ✓ |
+| BASE | 2 | 1.00 | ✓ |
+| BASE | 3 | 1.00 | ✓ |
+| BASE | 4 | 1.00 | ✓ |
+| FACTS | 5 | 1.00 | ✓ |
+| FACTS | 6 | 1.00 | ✓ |
+| FACTS | 7 | 1.00 | ✓ |
+| FACTS | 8 | 1.00 | ✓ |
+
+**avg header score: 1.000 — gate (min 0.5): PASS**

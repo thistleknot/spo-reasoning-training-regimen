@@ -388,11 +388,24 @@ Apply downstream judging or calibration if you want numeric confidence later. Th
 
 Three compounding bugs caused the initial SPO training to produce worse output than the base adapter. Each one is subtle and worth documenting because they are easy to repeat in any RL-from-feedback setup.
 
-### 1. Greedy decoding without repetition controls loops forever
+### 1. Greedy decoding without repetition controls loops forever — but the wrong controls break headers
 
-`model.generate()` with `do_sample=False` and no `repetition_penalty` will lock onto any high-probability token sequence and repeat it indefinitely. The model is not broken — it is being perfectly greedy. A single repeated line scores just as well on format metrics as a unique one, so the problem is invisible to offline evaluation.
+`model.generate()` with `do_sample=False` can lock onto a high-probability token sequence and repeat it indefinitely. The model is not broken — it is being perfectly greedy. A single repeated line scores just as well on format metrics as a unique one, so the problem is invisible to offline evaluation.
 
-**Fix:** Add `repetition_penalty=1.3` and `no_repeat_ngram_size=4` to every `generate()` call used in evaluation or inference. These two parameters eliminate exact-line repetition without degrading structured output format.
+**Wrong fix (common trap):** `repetition_penalty=1.3` penalises **all** tokens that appear earlier in the full input+output context — including the prompt itself. If the prompt contains `Non-Entailed Premises` in an instruction list (which it does), `repetition_penalty` prevents the model from outputting those exact tokens, so it produces garbled variants like `Non-EntailedPremise:` or `Non-Entailed Prems:`. Similarly, `no_repeat_ngram_size=4` blocks any 4-gram that appears in the prompt from being generated, and `Non Entailed Premises` is exactly 3–4 tokens in Qwen's tokenizer, making this setting destructive.
+
+**Correct fix:** Use `no_repeat_ngram_size=6` (or higher) without `repetition_penalty`. A 6-gram constraint prevents exact-line echoing without blocking the 3–4-token header sequences. A well-trained adapter will not loop; if it does, prefer `no_repeat_ngram_size=6` over `repetition_penalty`.
+
+```python
+out = model.generate(
+    **inputs,
+    max_new_tokens=384,
+    do_sample=False,
+    pad_token_id=tokenizer.eos_token_id,
+    no_repeat_ngram_size=6,   # safe: does not block header tokens
+    # repetition_penalty=1.3  # NEVER: breaks headers that echo prompt words
+)
+```
 
 ### 2. Format-only reward metrics actively reinforce repetition
 
@@ -472,9 +485,19 @@ score = contract.header_score(output)
 
 **Rule of thumb:** Any script that evaluates a fine-tuned instruct model must mirror the exact tokenizer call chain used during training. If training used `apply_chat_template`, evaluation must too. A mismatch is silent — there is no error; the model simply produces irrelevant output. The symptom (NO_HEADER, generic text, instruction echo) is easily misdiagnosed as a training problem or a token-budget problem when the root cause is purely a format mismatch in the evaluation harness.
 
+### 7. `repetition_penalty` silently corrupts structured headers when the prompt contains the header tokens
+
+The inference examples artifact (`examples/inference_examples.md`) was regenerated after stratified retraining using `repetition_penalty=1.3, no_repeat_ngram_size=4` — the same settings that had prevented line-looping in the old adapter. The new outputs had header scores of 0.00–0.33; the gate reported `FAIL`. The model was not regressing. The generation parameters were destroying the structured output.
+
+`repetition_penalty` applies a multiplicative penalty to **any token that has appeared anywhere in the full input+output sequence so far**, including the prompt. The prompt's instruction list contains `Non-Entailed Premises` and `Entailed Premises`. Under a penalty of 1.3, those tokens become less likely in the output, so the model generates close-but-wrong variants (`Non-EntailedPremise:`, `Non-Entailed Prems:`). `no_repeat_ngram_size=4` has the same effect: it blocks any 4-gram appearing in the prompt from being regenerated, and `Non Entailed Premises` is 3–4 tokens in Qwen's tokenizer.
+
+**Fix:** Remove `repetition_penalty` entirely. Use `no_repeat_ngram_size=6` — large enough to prevent exact-line looping but larger than the header sequences. After this change all 8 inference examples scored 1.00 (gate avg=1.000).
+
+**Diagnostic signature:** a model that passes the gate without these penalties but fails with them, producing headers like `Non-EntailedPremise:` or `Non-Entailed Prems:`, is almost certainly hitting this penalty-vs-prompt-token conflict. Check whether the expected output headers appear verbatim in the prompt before adding any repetition control.
+
 ### Takeaway
 
-For any RL-from-feedback training loop: (1) generation controls must prevent degenerate outputs before rewards are ever computed, (2) reward functions must explicitly penalise known failure modes rather than only rewarding the ideal case, (3) reward signals computed from gold data are always suspect — check that the distribution of rewards across your training set actually varies before assuming SPO is doing anything useful, (4) offline preference optimisation cannot correct a habit the model has never been penalised for producing — if the failure mode is a specific generated token sequence, only online generation-and-penalise RL can reliably fix it, (5) for small models, multi-regimen training on semantically overlapping formats requires stratified sampling across (regimen × prompt-length) strata — without it, whichever regimen dominates the data mix will corrupt the shared header vocabulary for the other regimens, and (6) post-training evaluation scripts must mirror the exact prompt-format pipeline used during training — a chat-template mismatch produces NO_HEADER silently and is trivially diagnosed as a training bug or token-budget problem when the real cause is a one-line harness error.
+For any RL-from-feedback training loop: (1) generation controls must prevent degenerate outputs before rewards are ever computed, (2) reward functions must explicitly penalise known failure modes rather than only rewarding the ideal case, (3) reward signals computed from gold data are always suspect — check that the distribution of rewards across your training set actually varies before assuming SPO is doing anything useful, (4) offline preference optimisation cannot correct a habit the model has never been penalised for producing — if the failure mode is a specific generated token sequence, only online generation-and-penalise RL can reliably fix it, (5) for small models, multi-regimen training on semantically overlapping formats requires stratified sampling across (regimen × prompt-length) strata — without it, whichever regimen dominates the data mix will corrupt the shared header vocabulary for the other regimens, (6) post-training evaluation scripts must mirror the exact prompt-format pipeline used during training — a chat-template mismatch produces NO_HEADER silently, and (7) `repetition_penalty` corrupts structured headers whenever those headers appear verbatim in the prompt instruction list — use `no_repeat_ngram_size=6` instead.
 
 ---
 

@@ -156,9 +156,10 @@ class SPOEvaluatorHeaderTests(unittest.TestCase):
         self.assertAlmostEqual(score, 2 / 3, places=2)
 
     def test_perfect_output_scores_one(self) -> None:
-        """Output with all canonical headers, proper triplets, confidence, and tags scores 1.0."""
+        """Output with all canonical headers, proper triplets, confidence, and tags scores ~0.95."""
         score = SPOEvaluator.evaluate_triplet_correctness(self.PERFECT_OUTPUT)
-        self.assertAlmostEqual(score, 1.0, places=2)
+        # Max without GT bonus: triplet=0.20 + header=0.30 + conf=0.15 + evid=0.15 + quality=0.15 = 0.95
+        self.assertAlmostEqual(score, 0.95, places=2)
 
     def test_garbled_headers_score_lower_than_canonical(self) -> None:
         """Same triplet content but garbled headers should score lower than canonical headers."""
@@ -173,8 +174,56 @@ class SPOEvaluatorHeaderTests(unittest.TestCase):
             "talking | confirms (observed, confidence=1.0) | foolishness\n"
         )
         score = SPOEvaluator.evaluate_triplet_correctness(no_headers)
-        # Max possible without any header credit: 0.25 + 0.15 + 0.15 + 0.1 = 0.65
+        # Max possible without header credit:
+        #   triplet=0.20 + confidence=0.15 + evidence=0.15 + quality_checks=0.15 = 0.65
         self.assertLessEqual(score, 0.65 + 1e-6)
+
+    def test_trivial_is_predicate_penalised(self) -> None:
+        """Triplets whose sole predicate is a bare copula ('is') should score lower."""
+        trivial = (
+            "Non-Entailed Premises:\n"
+            "everyone | is | already taken (observed, confidence=1.0)\n"
+            "the path | is | chosen (inferred, confidence=0.8)\n"
+            "Entailed Premises:\n"
+            "be yourself | is | the correct action (observed, confidence=1.0)\n"
+            "Throughline:\n"
+            "Self-expression is paramount.\n"
+        )
+        meaningful = (
+            "Non-Entailed Premises:\n"
+            "everyone | occupies (observed, confidence=1.0) | a unique role\n"
+            "the path | leads (inferred, confidence=0.8) | toward authenticity\n"
+            "Entailed Premises:\n"
+            "be yourself | validates (observed, confidence=1.0) | personal identity\n"
+            "Throughline:\n"
+            "Self-expression is paramount.\n"
+        )
+        score_trivial   = SPOEvaluator.evaluate_triplet_correctness(trivial)
+        score_meaningful = SPOEvaluator.evaluate_triplet_correctness(meaningful)
+        self.assertGreater(score_meaningful, score_trivial)
+
+    def test_predicate_echo_in_object_penalised(self) -> None:
+        """When the object starts with the same word as the predicate, the score is reduced."""
+        # Canonical failure mode: 'be yourself | is | is the correct action'
+        echo = (
+            "Non-Entailed Premises:\n"
+            "identity | implies (inferred, confidence=0.8) | implies uniqueness\n"
+            "Entailed Premises:\n"
+            "be yourself | is (observed, confidence=1.0) | is the correct action\n"
+            "Throughline:\n"
+            "Authenticity matters.\n"
+        )
+        clean = (
+            "Non-Entailed Premises:\n"
+            "identity | shapes (inferred, confidence=0.8) | how others perceive us\n"
+            "Entailed Premises:\n"
+            "be yourself | validates (observed, confidence=1.0) | personal identity\n"
+            "Throughline:\n"
+            "Authenticity matters.\n"
+        )
+        score_echo  = SPOEvaluator.evaluate_triplet_correctness(echo)
+        score_clean = SPOEvaluator.evaluate_triplet_correctness(clean)
+        self.assertGreater(score_clean, score_echo)
 
 
 

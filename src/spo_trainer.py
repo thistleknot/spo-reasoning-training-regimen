@@ -461,13 +461,15 @@ class SPOEvaluator:
         """Evaluate correctness of triplet-based output.
 
         Scores based on:
-        - Triplet format preservation (subject | relation | object) [0.25 weight]
-        - Section header correctness against contract or CANONICAL_HEADERS [0.35 weight]
+        - Triplet format preservation (subject | relation | object) [0.20 weight]
+        - Section header correctness against contract or CANONICAL_HEADERS [0.30 weight]
         - Confidence score presence [0.15 weight]
         - Evidence tag correctness (observed vs inferred) [0.15 weight]
         - Uniqueness ratio: hard-zero if > half the triplet lines are duplicates [gate]
-        - Non-self-referential content: deduct if tautological triplets dominate [0.1 weight]
-        - Ground-truth overlap via SequenceMatcher if provided [0.1 bonus, capped at 1.0]
+        - Tautology penalty: subject appears in object field [0.05 weight]
+        - Trivial-predicate penalty: bare copula ('is'/'are'/…) as sole predicate [0.05 weight]
+        - Predicate-echo-in-object penalty: object starts with predicate token [0.05 weight]
+        - Ground-truth overlap via SequenceMatcher if provided [0.05 bonus, capped at 1.0]
 
         When a PromptContract is provided its expected_headers drive the header
         score. This prevents the evaluator drifting out of sync with the prompt.
@@ -492,15 +494,15 @@ class SPOEvaluator:
 
         score = 0.0
 
-        # Triplet format check [0.25]
+        # Triplet format check [0.20]
         if triplet_lines:
-            score += 0.25
+            score += 0.20
 
-        # Section header correctness [0.35] — use contract when provided, else CANONICAL_HEADERS
+        # Section header correctness [0.30] — use contract when provided, else CANONICAL_HEADERS
         if contract is not None:
-            score += 0.35 * contract.header_score(model_output)
+            score += 0.30 * contract.header_score(model_output)
         else:
-            score += 0.35 * SPOEvaluator._header_score(model_output)
+            score += 0.30 * SPOEvaluator._header_score(model_output)
 
         # Confidence annotation [0.15]
         if re.search(r"confidence=", model_output):
@@ -511,7 +513,7 @@ class SPOEvaluator:
             score += 0.15
 
         # Tautology penalty: subject appears as a substring of the object field,
-        # e.g. "the speaker | is ... | is the speaker" or "x | is | x itself" [0.1]
+        # e.g. "the speaker | is ... | is the speaker" or "x | is | x itself" [0.05]
         def _is_tautological(line: str) -> bool:
             parts = [p.strip().lower() for p in line.split("|")]
             if len(parts) < 3:
@@ -520,9 +522,37 @@ class SPOEvaluator:
             obj = re.sub(r"\(.*?\)", "", parts[2]).strip()
             return len(subject) >= 3 and subject in obj
 
+        # Trivial-predicate penalty: bare copula ('is', 'are', 'was' …) as the
+        # entire predicate adds no semantic content and is a known failure mode
+        # where the model copies prompt phrasing rather than extracting a relation.
+        _TRIVIAL_PREDICATES = {"is", "are", "was", "were", "has", "have", "had", "be"}
+
+        def _is_trivial_predicate(line: str) -> bool:
+            parts = [p.strip() for p in line.split("|")]
+            if len(parts) < 2:
+                return False
+            pred_clean = re.sub(r"\(.*?\)", "", parts[1]).strip().lower()
+            return pred_clean in _TRIVIAL_PREDICATES
+
+        # Predicate-echo-in-object penalty: object field starts with the same
+        # token as the predicate (e.g. "x | is | is the correct action"), which
+        # indicates a circular definition where the relation is repeated instead
+        # of naming a distinct object.
+        def _object_echoes_predicate(line: str) -> bool:
+            parts = [p.strip() for p in line.split("|")]
+            if len(parts) < 3:
+                return False
+            pred_words = re.sub(r"\(.*?\)", "", parts[1]).strip().lower().split()
+            obj_words = re.sub(r"\(.*?\)", "", parts[2]).strip().lower().split()
+            return bool(pred_words and obj_words and pred_words[0] == obj_words[0])
+
         if triplet_lines:
-            taut_ratio = sum(1 for t in triplet_lines if _is_tautological(t)) / len(triplet_lines)
-            score += 0.1 * (1.0 - taut_ratio)
+            taut_ratio   = sum(1 for t in triplet_lines if _is_tautological(t))   / len(triplet_lines)
+            trivial_ratio = sum(1 for t in triplet_lines if _is_trivial_predicate(t)) / len(triplet_lines)
+            echo_ratio   = sum(1 for t in triplet_lines if _object_echoes_predicate(t)) / len(triplet_lines)
+            score += 0.05 * (1.0 - taut_ratio)
+            score += 0.05 * (1.0 - trivial_ratio)
+            score += 0.05 * (1.0 - echo_ratio)
 
         # Ground-truth overlap bonus [0.1 max]
         if ground_truth and ground_truth.strip():
@@ -530,7 +560,7 @@ class SPOEvaluator:
             overlap = difflib.SequenceMatcher(
                 None, model_output.strip(), ground_truth.strip()
             ).ratio()
-            score += 0.1 * overlap
+            score += 0.05 * overlap
 
         return min(score, 1.0)
 

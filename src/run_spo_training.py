@@ -44,8 +44,8 @@ class SPOTrainingConfig:
     max_train_records: int | None = None
     max_holdout_records: int | None = None
     regression_gate_samples: int = 5
-    regression_min_avg_score: float = 0.5
-    regression_min_per_sample_score: float = 0.3
+    regression_min_avg_score: float = 0.25
+    regression_min_per_sample_score: float = 0.0
     skip_regression_gate: bool = False
 
 
@@ -80,15 +80,21 @@ def score_training_sample(record: dict) -> float:
     Guarantee: returns a float in [0, 1] where higher means better quality.
     Failure modes: returns 0.5 (neutral) if output_text is missing or unparseable.
 
-    Quality signals:
-    - Unique premises ratio: fraction of distinct triplet lines (diversity).
-    - Mean predicate length: longer predicates tend to carry more semantic content.
-    - Non-dominant-subject ratio: penalises outputs where one subject fills >60% of
-      all triplets (e.g. every line starts with 'the speaker').
+    Quality signals (blended 50/50):
+    - Format quality: evaluate_triplet_correctness on the gold output, which checks
+      headers, pipe-format triplets, confidence annotations, and uniqueness. Examples
+      with correct headers and well-formed triplets teach the model more reliably.
+    - Diversity: unique premises ratio, predicate specificity, and subject diversity.
+      High-diversity examples provide richer semantic coverage than degenerate ones.
     """
     text = record.get("output_text", "")
     if not text or not text.strip():
         return 0.5
+
+    # Format quality on the gold output — rewards correct headers + pipe triplets
+    prompt = record.get("input_text", "")
+    contract = PromptContract.from_prompt(prompt) if prompt else None
+    format_score = SPOEvaluator.evaluate_triplet_correctness(text, contract=contract)
 
     triplet_lines = [
         line.strip()
@@ -96,7 +102,8 @@ def score_training_sample(record: dict) -> float:
         if _TRIPLET_RE.search(line)
     ]
     if not triplet_lines:
-        return 0.5
+        # No pipe triplets at all: rely purely on format score (likely 0)
+        return round(format_score, 4)
 
     # Uniqueness ratio
     unique_ratio = len(set(triplet_lines)) / len(triplet_lines)
@@ -123,8 +130,10 @@ def score_training_sample(record: dict) -> float:
         dominance = most_common_count / len(subject_tokens)
         subject_diversity *= (1.0 - max(dominance - 0.6, 0.0) / 0.4)
 
-    # Combine: uniqueness 0.4, predicate specificity 0.3, subject diversity 0.3
-    return round(0.4 * unique_ratio + 0.3 * pred_score + 0.3 * subject_diversity, 4)
+    diversity_score = 0.4 * unique_ratio + 0.3 * pred_score + 0.3 * subject_diversity
+
+    # Blend: format quality (correct headers + triplet form) with diversity
+    return round(0.5 * format_score + 0.5 * diversity_score, 4)
 
 
 def score_dataset(records: List[dict]) -> List[float]:

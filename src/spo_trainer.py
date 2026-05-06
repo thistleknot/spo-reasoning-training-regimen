@@ -7,8 +7,8 @@ accurate confidence to its own predictions.
 
 import json
 import re
-from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
 
@@ -24,6 +24,122 @@ class SPOReward:
         self.correctness = correctness
         self.confidence = confidence
         self.reward = correctness * confidence
+
+
+@dataclass
+class PromptContract:
+    """Output format contract derived from a training or inference prompt.
+
+    Parses the numbered section list from a prompt's 'Generate a response with:'
+    block to determine which section headers the model is expected to produce.
+    This decouples the quality gate from hardcoded header lists — changing the
+    prompt automatically changes what the evaluator checks for.
+
+    Require:  prompt contains a 'Generate a response with:' block with numbered items
+    Guarantee: expected_headers is a list of header strings ending with ':'
+    Maintain:  empty expected_headers means no header constraint (score=1.0 by default)
+    """
+
+    expected_headers: List[str] = field(default_factory=list)
+
+    @classmethod
+    def from_prompt(cls, prompt: str) -> "PromptContract":
+        """Parse expected section headers from the numbered list in a prompt.
+
+        Extracts items from a block like:
+            Generate a response with:
+            1. Non-Entailed Premises
+            2. Entailed Premises
+            3. Throughline
+
+        Each item becomes a header string with ':' appended, matching the
+        format the model is expected to output.
+        """
+        match = re.search(
+            r"Generate a response with:\s*\n((?:\d+\.\s*.+\n?)+)",
+            prompt,
+        )
+        if not match:
+            return cls(expected_headers=[])
+        section_block = match.group(1)
+        headers = []
+        for line in section_block.splitlines():
+            m = re.match(r"\d+\.\s+(.+)", line.strip())
+            if m:
+                headers.append(m.group(1).strip() + ":")
+        return cls(expected_headers=headers)
+
+    def header_score(self, model_output: str) -> float:
+        """Fraction of expected headers present in the output with exact match.
+
+        A garbled or abbreviated header (e.g. 'Throughlin\\':') earns zero for
+        that slot — the model attempted the header but got the spelling wrong,
+        which is strictly worse than an absent optional section.
+
+        Returns 1.0 when expected_headers is empty (no contract → no penalty).
+        """
+        if not self.expected_headers:
+            return 1.0
+        header_lines = {
+            line.strip()
+            for line in model_output.splitlines()
+            if line.strip().endswith(":")
+            and "|" not in line
+            and len(line.strip()) <= 60
+        }
+        hits = sum(1 for h in self.expected_headers if h in header_lines)
+        return hits / len(self.expected_headers)
+
+
+def assert_output_quality(
+    outputs: List[str],
+    prompts: Optional[List[str]] = None,
+    min_avg_score: float = 0.5,
+    min_per_sample_score: float = 0.3,
+) -> None:
+    """Regression gate: raises AssertionError if generated outputs fall below thresholds.
+
+    Called after SPO training to verify the adapter produces outputs that satisfy
+    the prompt contract. A failing gate means the RL training has regressed output
+    quality below an acceptable floor.
+
+    Require:
+        outputs is non-empty
+        min_avg_score and min_per_sample_score are in [0, 1]
+    Guarantee:
+        Raises AssertionError with per-sample details on any quality failure
+        Returns None (no exception) when all outputs pass both thresholds
+    """
+    if not outputs:
+        raise AssertionError("assert_output_quality: outputs list is empty")
+
+    scores = []
+    per_sample_failures = []
+    for i, output in enumerate(outputs):
+        contract = PromptContract.from_prompt(prompts[i]) if prompts else None
+        score = SPOEvaluator.evaluate_triplet_correctness(output, contract=contract)
+        scores.append(score)
+        if score < min_per_sample_score:
+            preview = output.replace("\n", " ")[:120]
+            per_sample_failures.append((i, score, preview))
+
+    avg_score = sum(scores) / len(scores)
+
+    if per_sample_failures:
+        lines = [
+            f"  sample {i}: score={s:.3f} — {preview!r}"
+            for i, s, preview in per_sample_failures
+        ]
+        raise AssertionError(
+            f"Output quality gate: {len(per_sample_failures)}/{len(outputs)} samples "
+            f"below per-sample floor {min_per_sample_score:.2f}\n" + "\n".join(lines)
+        )
+
+    if avg_score < min_avg_score:
+        raise AssertionError(
+            f"Output quality gate: avg_score={avg_score:.3f} below "
+            f"avg floor {min_avg_score:.2f} across {len(outputs)} samples"
+        )
 
 
 class SPOTrainer:
@@ -309,17 +425,21 @@ class SPOEvaluator:
     def evaluate_triplet_correctness(
         model_output: str,
         ground_truth: Optional[str] = None,
+        contract: Optional["PromptContract"] = None,
     ) -> float:
         """Evaluate correctness of triplet-based output.
 
         Scores based on:
         - Triplet format preservation (subject | relation | object) [0.25 weight]
-        - Section header correctness (exact canonical names) [0.35 weight]
+        - Section header correctness against contract or CANONICAL_HEADERS [0.35 weight]
         - Confidence score presence [0.15 weight]
         - Evidence tag correctness (observed vs inferred) [0.15 weight]
         - Uniqueness ratio: hard-zero if > half the triplet lines are duplicates [gate]
         - Non-self-referential content: deduct if tautological triplets dominate [0.1 weight]
         - Ground-truth overlap via SequenceMatcher if provided [0.1 bonus, capped at 1.0]
+
+        When a PromptContract is provided its expected_headers drive the header
+        score. This prevents the evaluator drifting out of sync with the prompt.
 
         Returns score 0.0-1.0
         """
@@ -345,8 +465,11 @@ class SPOEvaluator:
         if triplet_lines:
             score += 0.25
 
-        # Section header correctness [0.35] — canonical exact-match fraction
-        score += 0.35 * SPOEvaluator._header_score(model_output)
+        # Section header correctness [0.35] — use contract when provided, else CANONICAL_HEADERS
+        if contract is not None:
+            score += 0.35 * contract.header_score(model_output)
+        else:
+            score += 0.35 * SPOEvaluator._header_score(model_output)
 
         # Confidence annotation [0.15]
         if re.search(r"confidence=", model_output):

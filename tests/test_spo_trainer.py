@@ -4,7 +4,13 @@ import unittest
 
 import torch
 
-from src.spo_trainer import SPOEvaluator, SPOReward, SPOTrainer
+from src.spo_trainer import (
+    PromptContract,
+    SPOEvaluator,
+    SPOReward,
+    SPOTrainer,
+    assert_output_quality,
+)
 
 
 class SPOTrainerTests(unittest.TestCase):
@@ -232,5 +238,121 @@ class SPOEvaluatorHeaderTests(unittest.TestCase):
         self.assertTrue(all(0.0 <= s <= 1.0 for s in scores))
 
 
+class PromptContractTests(unittest.TestCase):
+    """Lock PromptContract.from_prompt() parsing and header_score() logic."""
+
+    TWO_SECTION_PROMPT = (
+        'Given this quote, extract the implicit reasoning.\n\n'
+        'Quote: "Be yourself."\n\n'
+        'Generate a response with:\n'
+        '1. Non-Entailed Premises\n'
+        '2. Entailed Premises\n\n'
+        'Format each premise as: subject | relation (tag) | object\n'
+        'Response:'
+    )
+    THREE_SECTION_PROMPT = (
+        'Given this quote, extract the implicit reasoning.\n\n'
+        'Quote: "Be yourself."\n\n'
+        'Generate a response with:\n'
+        '1. Non-Entailed Premises\n'
+        '2. Entailed Premises\n'
+        '3. Throughline\n\n'
+        'Response:'
+    )
+
+    def test_parses_two_section_prompt(self) -> None:
+        contract = PromptContract.from_prompt(self.TWO_SECTION_PROMPT)
+        self.assertEqual(contract.expected_headers, ["Non-Entailed Premises:", "Entailed Premises:"])
+
+    def test_parses_three_section_prompt(self) -> None:
+        contract = PromptContract.from_prompt(self.THREE_SECTION_PROMPT)
+        self.assertEqual(
+            contract.expected_headers,
+            ["Non-Entailed Premises:", "Entailed Premises:", "Throughline:"],
+        )
+
+    def test_empty_contract_on_no_match(self) -> None:
+        contract = PromptContract.from_prompt("No generate block here.")
+        self.assertEqual(contract.expected_headers, [])
+        self.assertEqual(contract.header_score("anything"), 1.0)
+
+    def test_header_score_exact_match(self) -> None:
+        contract = PromptContract.from_prompt(self.TWO_SECTION_PROMPT)
+        output = "Non-Entailed Premises:\nfoo | is | bar\n\nEntailed Premises:\nbaz | is | qux\n"
+        self.assertAlmostEqual(contract.header_score(output), 1.0)
+
+    def test_header_score_garbled(self) -> None:
+        contract = PromptContract.from_prompt(self.TWO_SECTION_PROMPT)
+        output = "Non-Entailed Prems:\nfoo | is | bar\n\nEntailed Prims:\nbaz | is | qux\n"
+        self.assertAlmostEqual(contract.header_score(output), 0.0)
+
+    def test_evaluate_triplet_correctness_uses_contract(self) -> None:
+        """Contract-aware evaluation scores higher than hardcoded CANONICAL_HEADERS
+        when the prompt only specifies 2 sections (model produces exactly those 2)."""
+        contract = PromptContract.from_prompt(self.TWO_SECTION_PROMPT)
+        output = (
+            "Non-Entailed Premises:\n"
+            "silence | implies (inferred, confidence=0.8) | wisdom\n\n"
+            "Entailed Premises:\n"
+            "talking | confirms (observed, confidence=1.0) | foolishness\n"
+        )
+        score_with_contract = SPOEvaluator.evaluate_triplet_correctness(output, contract=contract)
+        score_without_contract = SPOEvaluator.evaluate_triplet_correctness(output)
+        # With 2-section contract the header score is 2/2=1.0; without it 2/3≈0.667
+        self.assertGreater(score_with_contract, score_without_contract)
+
+
+class AssertOutputQualityTests(unittest.TestCase):
+    """Lock the post-training regression gate behavior."""
+
+    GOOD_OUTPUT = (
+        "Non-Entailed Premises:\n"
+        "silence | implies (inferred, confidence=0.8) | wisdom\n\n"
+        "Entailed Premises:\n"
+        "talking | confirms (observed, confidence=1.0) | foolishness\n\n"
+        "Throughline:\n"
+        "remaining silent avoids confirming foolishness\n"
+    )
+    BAD_OUTPUT = "\n".join(
+        ["majority | is (observed, confidence=1.0) | is a group of people"] * 8
+    )
+
+    def test_good_output_passes_gate(self) -> None:
+        """A clean output should pass without raising."""
+        assert_output_quality([self.GOOD_OUTPUT], min_avg_score=0.5, min_per_sample_score=0.3)
+
+    def test_repeated_output_fails_gate(self) -> None:
+        """An output that triggers the uniqueness hard-zero should fail the gate."""
+        with self.assertRaises(AssertionError):
+            assert_output_quality([self.BAD_OUTPUT], min_per_sample_score=0.3)
+
+    def test_empty_outputs_raises(self) -> None:
+        with self.assertRaises(AssertionError):
+            assert_output_quality([])
+
+    def test_gate_uses_prompt_contract(self) -> None:
+        """When prompts are provided, the gate uses per-prompt contracts."""
+        prompt = (
+            'Given this quote.\n\nGenerate a response with:\n'
+            '1. Non-Entailed Premises\n'
+            '2. Entailed Premises\n\nResponse:'
+        )
+        # Output satisfies exactly those two sections — should pass
+        output = (
+            "Non-Entailed Premises:\n"
+            "silence | implies (inferred, confidence=0.8) | wisdom\n\n"
+            "Entailed Premises:\n"
+            "talking | confirms (observed, confidence=1.0) | foolishness\n"
+        )
+        assert_output_quality([output], prompts=[prompt], min_avg_score=0.5, min_per_sample_score=0.3)
+
+    def test_below_avg_threshold_fails(self) -> None:
+        """An output that's individually OK but drags avg below threshold should fail."""
+        mediocre = "some text without triplets or headers"
+        with self.assertRaises(AssertionError):
+            assert_output_quality([mediocre], min_avg_score=0.9, min_per_sample_score=0.0)
+
+
 if __name__ == "__main__":
     unittest.main()
+

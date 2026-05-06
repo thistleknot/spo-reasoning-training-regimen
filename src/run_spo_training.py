@@ -15,11 +15,12 @@ from transformers import AutoTokenizer
 from .run_ablation_matrix import (
     build_training_examples,
     collator,
+    generate_completion,
     load_jsonl,
     split_indices,
     subset_records,
 )
-from .spo_trainer import SPOEvaluator, SPOTrainer
+from .spo_trainer import PromptContract, SPOEvaluator, SPOTrainer, assert_output_quality
 
 
 @dataclass
@@ -42,6 +43,10 @@ class SPOTrainingConfig:
     logging_steps: int = 10
     max_train_records: int | None = None
     max_holdout_records: int | None = None
+    regression_gate_samples: int = 5
+    regression_min_avg_score: float = 0.5
+    regression_min_per_sample_score: float = 0.3
+    skip_regression_gate: bool = False
 
 
 def maybe_limit(records: List[dict], limit: int | None) -> List[dict]:
@@ -266,6 +271,40 @@ def run_spo_training(config: SPOTrainingConfig) -> dict:
     model.save_pretrained(output_dir / "adapter")
     tokenizer.save_pretrained(output_dir / "adapter")
 
+    # Regression gate: generate actual model outputs on a sample of holdout prompts
+    # and assert quality meets the floor. A failure here means SPO training degraded
+    # the adapter below an acceptable quality threshold.
+    regression_samples = holdout_records[: config.regression_gate_samples]
+    if regression_samples and not config.skip_regression_gate:
+        gate_prompts = [r["input_text"] for r in regression_samples]
+        gate_outputs = [
+            generate_completion(model, tokenizer, prompt, max_new_tokens=256)
+            for prompt in gate_prompts
+        ]
+        gate_contracts = [PromptContract.from_prompt(p) for p in gate_prompts]
+        gate_scores = [
+            SPOEvaluator.evaluate_triplet_correctness(out, contract=c)
+            for out, c in zip(gate_outputs, gate_contracts)
+        ]
+        gate_summary = {
+            "samples": [
+                {"prompt_snippet": p[:80], "output": o, "score": s}
+                for p, o, s in zip(gate_prompts, gate_outputs, gate_scores)
+            ],
+            "avg_score": sum(gate_scores) / len(gate_scores),
+            "min_avg_threshold": config.regression_min_avg_score,
+            "min_per_sample_threshold": config.regression_min_per_sample_score,
+        }
+        (output_dir / "regression_gate.json").write_text(
+            json.dumps(gate_summary, indent=2) + "\n"
+        )
+        assert_output_quality(
+            gate_outputs,
+            prompts=gate_prompts,
+            min_avg_score=config.regression_min_avg_score,
+            min_per_sample_score=config.regression_min_per_sample_score,
+        )
+
     holdout_rewards, holdout_metrics = trainer.evaluate_batch(
         inputs=[record["input_text"] for record in holdout_records],
         outputs=[record["output_text"] for record in holdout_records],
@@ -309,6 +348,10 @@ if __name__ == "__main__":
     parser.add_argument("--logging-steps", type=int, default=10)
     parser.add_argument("--max-train-records", type=int, default=None)
     parser.add_argument("--max-holdout-records", type=int, default=None)
+    parser.add_argument("--regression-gate-samples", type=int, default=5)
+    parser.add_argument("--regression-min-avg-score", type=float, default=0.5)
+    parser.add_argument("--regression-min-per-sample-score", type=float, default=0.3)
+    parser.add_argument("--skip-regression-gate", action="store_true", default=False)
     args = parser.parse_args()
 
     result = run_spo_training(SPOTrainingConfig(**vars(args)))

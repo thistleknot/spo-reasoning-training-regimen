@@ -1,0 +1,64 @@
+{
+  "samples": [
+    {
+      "prompt_snippet": "Given this quote, extract the implicit reasoning.\n\nQuote: \"I'm selfish, impatien",
+      "output": "Non-Entailed Premises:\nselfish | inferred | I\n\nEntailed Premises:\n\nselfish | inferred | at times hard to handle\n\nThroughline:\nI make mistakes, I am insecure, and I am out of control.",
+      "score": 0.6500000000000001,
+      "header_score": 1.0,
+      "expected_headers": [
+        "Non-Entailed Premises:",
+        "Entailed Premises:",
+        "Throughline:"
+      ]
+    },
+    {
+      "prompt_snippet": "Given this quote, extract the implicit reasoning.\n\nQuote: \"Darkness cannot drive",
+      "output": "Non-Entailed Premises:\ndarkness | cannot | drive out | darkness\n\nEntailed Premises:\n\ndarkness | cannot | do | that | only | light | can | do | that\n\nThroughline:\nOnly light can drive out darkness.",
+      "score": 0.6500000000000001,
+      "header_score": 1.0,
+      "expected_headers": [
+        "Non-Entailed Premises:",
+        "Entailed Premises:",
+        "Throughline:"
+      ]
+    },
+    {
+      "prompt_snippet": "Given this quote, extract the implicit reasoning.\n\nQuote: \"Here's to the crazy o",
+      "output": "Non-Entailed Premises:\ncrazy ones | observed | The misfits\n\nEntailed Premises:\n\nThroughline:\nThe quote asserts that the people who are crazy and change the world are the ones who do.",
+      "score": 0.6500000000000001,
+      "header_score": 1.0,
+      "expected_headers": [
+        "Non-Entailed Premises:",
+        "Entailed Premises:",
+        "Throughline:"
+      ]
+    },
+    {
+      "prompt_snippet": "Given this quote, extract the implicit reasoning.\n\nQuote: \"Imperfection is beaut",
+      "output": "Non-Entailed Premises:\nimperfect | is | beauty\n\nEntailed Premises:\n\nimperfect | is | madness\n\nThroughline:\nimperfect | implies | madness",
+      "score": 0.6233333333333334,
+      "header_score": 1.0,
+      "expected_headers": [
+        "Non-Entailed Premises:",
+        "Entailed Premises:",
+        "Throughline:"
+      ]
+    },
+    {
+      "prompt_snippet": "Given this quote, extract the implicit reasoning.\n\nQuote: \"Fairy tales are more ",
+      "output": "Non-Entailed Premises:\nFairy tales | are | more than true\n\nEntailed Premises:\n\nThroughline:\nFairy tales are more true because they tell us that they can be beaten.",
+      "score": 0.6100000000000001,
+      "header_score": 1.0,
+      "expected_headers": [
+        "Non-Entailed Premises:",
+        "Entailed Premises:",
+        "Throughline:"
+      ]
+    }
+  ],
+  "avg_score": 0.6366666666666667,
+  "avg_header_score": 1.0,
+  "min_avg_threshold": 0.5,
+  "min_per_sample_threshold": 0.3,
+  "min_header_threshold": 0.5
+}

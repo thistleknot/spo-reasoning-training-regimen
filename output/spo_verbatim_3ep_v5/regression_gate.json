@@ -1,0 +1,64 @@
+{
+  "samples": [
+    {
+      "prompt_snippet": "Given this quote, extract the implicit reasoning.\n\nQuote: \"A room without books ",
+      "output": "Non-Entailed Premises:\nbody | without | soul\n\nEntailed Premises:\n\nbody | without | soul | observed | inferred | confidence=0.9\n\nThroughline:\nA room without books is a body without a soul.",
+      "score": 0.8000000000000002,
+      "header_score": 1.0,
+      "expected_headers": [
+        "Non-Entailed Premises:",
+        "Entailed Premises:",
+        "Throughline:"
+      ]
+    },
+    {
+      "prompt_snippet": "Given this quote, extract the implicit reasoning.\n\nQuote: \"It is not a lack of l",
+      "output": "Non-Entailed Premises:\nunhappy marriages | observed | lack of friendship\n\nEntailed Premises:\n\nunhappy marriages | inferred | lack of friendship\n\nThroughline:\nThe quote asserts that unhappiness in marriages is caused by a lack of friendship, not a lack of love.",
+      "score": 0.6500000000000001,
+      "header_score": 1.0,
+      "expected_headers": [
+        "Non-Entailed Premises:",
+        "Entailed Premises:",
+        "Throughline:"
+      ]
+    },
+    {
+      "prompt_snippet": "Given this quote, extract the implicit reasoning.\n\nQuote: \"I solemnly swear that",
+      "output": "Non-Entailed Premises:\nI solemnly swear that | inferred | I am up to no bad\n\nEntailed Premises:\n\nThroughline:\nI solemnly swore that I am up to nothing good.",
+      "score": 0.5000000000000001,
+      "header_score": 1.0,
+      "expected_headers": [
+        "Non-Entailed Premises:",
+        "Entailed Premises:",
+        "Throughline:"
+      ]
+    },
+    {
+      "prompt_snippet": "Given this quote, extract the implicit reasoning.\n\nQuote: \"I love deadlines. I l",
+      "output": "Non-Entailed Premises:\nI | love | deadlines\n\nEntailed Premises:\n\nI | love | deadlines | as they go by\n\nThroughline:\nI love deadlines as they go by.",
+      "score": 0.6500000000000001,
+      "header_score": 1.0,
+      "expected_headers": [
+        "Non-Entailed Premises:",
+        "Entailed Premises:",
+        "Throughline:"
+      ]
+    },
+    {
+      "prompt_snippet": "Given this quote, extract the implicit reasoning.\n\nQuote: \"To the well-organized",
+      "output": "Non-Entailed Premises:\ndeath | is | the next great adventure\n\nEntailed Premises:\n\nThroughline:\ndeath is but the next great Adventure",
+      "score": 0.4600000000000001,
+      "header_score": 1.0,
+      "expected_headers": [
+        "Non-Entailed Premises:",
+        "Entailed Premises:",
+        "Throughline:"
+      ]
+    }
+  ],
+  "avg_score": 0.6120000000000001,
+  "avg_header_score": 1.0,
+  "min_avg_threshold": 0.5,
+  "min_per_sample_threshold": 0.3,
+  "min_header_threshold": 0.5
+}

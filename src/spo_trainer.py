@@ -703,15 +703,19 @@ class SPOEvaluator:
             ).ratio()
             score += 0.05 * overlap
 
-        # Entailed-section verbatim faithfulness [0.15 penalty for non-verbatim].
-        # Hard requirement: subject and object of EVERY Entailed premise must be
-        # a verbatim span of the source quote (parenthetical transliterations are
-        # stripped before checking).  non-verbatim_ratio=0 → no penalty;
-        # non-verbatim_ratio=1 → -0.15.  Score floor is 0.0 (never negative).
-        if source_quote and source_quote.strip():
-            entailed_lines = SPOEvaluator._extract_section_triplets(
-                model_output, "Entailed Premises"
-            )
+        # Entailed Premises: empty gate + verbatim faithfulness.
+        # Extract entailed triplets once; reuse for both checks.
+        entailed_lines = SPOEvaluator._extract_section_triplets(
+            model_output, "Entailed Premises"
+        )
+        if not entailed_lines:
+            # Empty Entailed: structural failure — no load-bearing premises extracted.
+            # Penalise regardless of whether source_quote is available [-0.15].
+            score -= 0.15
+        elif source_quote and source_quote.strip():
+            # Non-empty: check verbatim faithfulness of subject/object fields.
+            # Hard requirement: Entailed subject/object must be verbatim quote spans.
+            # Non-verbatim fraction subtracts up to -0.15; fully verbatim = no penalty.
             verbatim_ratio = SPOEvaluator._entailed_verbatim_ratio(
                 entailed_lines, source_quote
             )

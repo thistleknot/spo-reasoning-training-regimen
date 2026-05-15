@@ -135,24 +135,45 @@ def serialize_training_record(
     }
 
 
+def is_tautological(record: dict) -> bool:
+    """Return True when entailed_premises == non_entailed_premises or entailed is empty.
+
+    Tautological records provide no distinguishing training signal: the model
+    cannot learn when a premise is load-bearing vs. contextual if both sections
+    are identical.  Filtering them out forces the model to learn a meaningful
+    distinction between the two sections.
+
+    Require: record has optional 'entailed_premises' and 'non_entailed_premises' keys.
+    Guarantee: returns bool; never raises.
+    """
+    e = set(record.get("entailed_premises") or [])
+    ne = set(record.get("non_entailed_premises") or [])
+    return (not e) or (e == ne)
+
+
 def convert_preprocessed_to_training(
     input_file: str,
     output_file: str,
     include_confidence: bool = False,
+    filter_tautological: bool = True,
 ) -> dict:
     """Convert preprocessed structured JSONL to training format JSONL.
 
     Args:
         input_file: Preprocessed structured JSONL
         output_file: Training format JSONL
-        include_confidence: Preserve numeric confidence in training rows.
+        include_confidence: Preserve numeric confidence in serialized training rows.
+        filter_tautological: Skip records where entailed == non_entailed or
+            entailed is empty.  Default True — tautological records teach no
+            distinction between load-bearing and contextual premises.
 
     Returns:
-        Statistics dict
+        Statistics dict with keys: total, converted, skipped_tautological, errors
     """
     stats = {
         "total": 0,
         "converted": 0,
+        "skipped_tautological": 0,
         "errors": 0,
     }
     
@@ -161,8 +182,11 @@ def convert_preprocessed_to_training(
             try:
                 structured = json.loads(line)
                 stats["total"] += 1
-                
-                # Convert to training format
+
+                if filter_tautological and is_tautological(structured):
+                    stats["skipped_tautological"] += 1
+                    continue
+
                 training_record = serialize_training_record(
                     structured,
                     include_confidence=include_confidence,
@@ -194,6 +218,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Keep numeric confidence annotations in the serialized training rows",
     )
+    parser.add_argument(
+        "--no-filter-tautological",
+        action="store_true",
+        help="Keep records where entailed_premises == non_entailed_premises (default: filter them out)",
+    )
     
     args = parser.parse_args()
     
@@ -201,9 +230,11 @@ if __name__ == "__main__":
         args.input,
         args.output,
         include_confidence=args.include_confidence,
+        filter_tautological=not args.no_filter_tautological,
     )
     
     print("\n=== CONVERSION STATISTICS ===")
     print(f"Total: {stats['total']}")
     print(f"Converted: {stats['converted']}")
+    print(f"Skipped (tautological): {stats['skipped_tautological']}")
     print(f"Errors: {stats['errors']}")

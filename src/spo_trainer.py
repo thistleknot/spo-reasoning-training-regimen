@@ -566,13 +566,13 @@ class SPOEvaluator:
         - Predicate-echo-in-object penalty: object starts with predicate token [0.04 weight]
         - Degenerate-subject penalty: empty or numeric-only subject (e.g. "1.") [0.03 weight]
         - Ground-truth overlap via SequenceMatcher if provided [0.05 bonus, capped at 1.0]
-        - Entailed-section verbatim faithfulness when source_quote provided [0.05 bonus, capped at 1.0]
+        - Entailed-section verbatim faithfulness when source_quote provided [0.15 penalty, floor 0.0]
 
         Section-targeted faithfulness gate:
         When ``source_quote`` is provided the Entailed Premises section is parsed
         separately.  Subject and object fields (after stripping any parenthetical
         transliterations) are checked against the source quote via ``find_span()``.
-        The fraction of verbatim components adds up to 0.05 to the score.  Non-
+        The fraction of non-verbatim components subtracts up to 0.15 from the score (floored at 0.0).  Non-
         entailed premises and the throughline are deliberately excluded — they are
         synthesised context, not extractive claims.
 
@@ -703,9 +703,11 @@ class SPOEvaluator:
             ).ratio()
             score += 0.05 * overlap
 
-        # Entailed-section verbatim faithfulness bonus [0.05 max]
-        # Checks that subject/object base text (after stripping parenthetical
-        # transliterations) appears as a verbatim span of the source quote.
+        # Entailed-section verbatim faithfulness [0.15 penalty for non-verbatim].
+        # Hard requirement: subject and object of EVERY Entailed premise must be
+        # a verbatim span of the source quote (parenthetical transliterations are
+        # stripped before checking).  non-verbatim_ratio=0 → no penalty;
+        # non-verbatim_ratio=1 → -0.15.  Score floor is 0.0 (never negative).
         if source_quote and source_quote.strip():
             entailed_lines = SPOEvaluator._extract_section_triplets(
                 model_output, "Entailed Premises"
@@ -713,9 +715,9 @@ class SPOEvaluator:
             verbatim_ratio = SPOEvaluator._entailed_verbatim_ratio(
                 entailed_lines, source_quote
             )
-            score += 0.05 * verbatim_ratio
+            score -= 0.15 * (1.0 - verbatim_ratio)
 
-        return min(score, 1.0)
+        return max(0.0, min(score, 1.0))
 
     @staticmethod
     def evaluate_syllogism_quality(

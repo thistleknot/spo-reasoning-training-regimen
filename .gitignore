@@ -26,3 +26,4 @@ models/
 *.bin
 .env
 .env.local
+!output/**/*.md

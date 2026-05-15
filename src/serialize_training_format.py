@@ -55,6 +55,9 @@ def build_base_reasoning_prompt(quote: str) -> str:
             '  Example: "unexamined life (a life without self-reflection) | lacks (observed, confidence=1.0) | worth"',
             "- Non-Entailed Premises and the Throughline may use your own words.",
             "",
+            "IMPORTANT: The Entailed Premises section MUST contain at least one triplet.",
+            "Never leave Entailed Premises empty.",
+            "",
             "Response:",
         ]
     )

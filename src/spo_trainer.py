@@ -207,11 +207,13 @@ class SPOTrainer:
 
         Looks for either triplet confidence annotations (`confidence=0.8`) or an
         explicit `Confidence:` section in score-bearing outputs.
+        Values outside [0, 1] are clamped so hallucinated values (1.5, -0.2) do
+        not inflate the SPO reward signal.
         """
         matches = re.findall(r"confidence\s*=\s*([0-9]*\.?[0-9]+)", output)
         if matches:
-            # Return average confidence
-            return sum(float(m) for m in matches) / len(matches)
+            values = [max(0.0, min(1.0, float(m))) for m in matches]
+            return sum(values) / len(values)
 
         section_match = re.search(
             r"Confidence:\s*(?:\n\s*)?([0-9]*\.?[0-9]+)",
@@ -219,7 +221,7 @@ class SPOTrainer:
             flags=re.IGNORECASE,
         )
         if section_match:
-            return float(section_match.group(1))
+            return max(0.0, min(1.0, float(section_match.group(1))))
 
         return 0.5  # Default
 
@@ -551,12 +553,18 @@ class SPOEvaluator:
         Scores based on:
         - Triplet format preservation (subject | relation | object) [0.20 weight]
         - Section header correctness against contract or CANONICAL_HEADERS [0.30 weight]
-        - Confidence score presence [0.15 weight]
-        - Evidence tag correctness (observed vs inferred) [0.15 weight]
+        - Confidence annotation validity [0.15 weight, proportional]:
+          ratio of confidence=X values where X is numeric and in [0,1].
+          Out-of-range (1.5, -0.2), comma-decimal (0,5), and tuple forms reduce score.
+        - Evidence tag validity [0.15 weight, proportional]:
+          ratio of annotation tags that are exactly 'observed' or 'inferred'.
+          Misspellings (obsined), compound forms (observed/derived), and synonyms
+          (inference, observable, obscured) all count as invalid.
         - Uniqueness ratio: hard-zero if > half the triplet lines are duplicates [gate]
-        - Tautology penalty: subject appears in object field [0.05 weight]
-        - Trivial-predicate penalty: bare copula ('is'/'are'/…) as sole predicate [0.05 weight]
-        - Predicate-echo-in-object penalty: object starts with predicate token [0.05 weight]
+        - Tautology penalty: subject appears in object field [0.04 weight]
+        - Trivial-predicate penalty: bare copula ('is'/'are'/…) as sole predicate [0.04 weight]
+        - Predicate-echo-in-object penalty: object starts with predicate token [0.04 weight]
+        - Degenerate-subject penalty: empty or numeric-only subject (e.g. "1.") [0.03 weight]
         - Ground-truth overlap via SequenceMatcher if provided [0.05 bonus, capped at 1.0]
         - Entailed-section verbatim faithfulness when source_quote provided [0.05 bonus, capped at 1.0]
 
@@ -601,16 +609,40 @@ class SPOEvaluator:
         else:
             score += 0.30 * SPOEvaluator._header_score(model_output)
 
-        # Confidence annotation [0.15]
-        if re.search(r"confidence=", model_output):
-            score += 0.15
+        # Confidence annotation [0.15] — proportional: only values parseable as
+        # float in [0, 1] count.  Comma decimals (0,5), ranges ((-0.5, 0.5)),
+        # and out-of-range values (1.5, -0.2) are all invalid and reduce the score.
+        _CONF_VAL_RE = re.compile(r"confidence\s*=\s*([^\s,)\n]+)")
 
-        # Evidence tags [0.15]
-        if re.search(r"\b(observed|inferred)\b", model_output):
-            score += 0.15
+        def _is_valid_confidence(v: str) -> bool:
+            try:
+                fv = float(v)
+                return 0.0 <= fv <= 1.0
+            except ValueError:
+                return False
+
+        conf_strs = _CONF_VAL_RE.findall(model_output)
+        if conf_strs:
+            valid_conf = sum(1 for v in conf_strs if _is_valid_confidence(v))
+            score += 0.15 * (valid_conf / len(conf_strs))
+
+        # Evidence tags [0.15] — proportional: tag must be exactly 'observed' or
+        # 'inferred' (case-insensitive).  Compound forms (observed/derived),
+        # misspellings (obsined, obsERVED), and synonyms (inference, observable)
+        # all count as invalid and reduce the per-triplet score.
+        _TAG_ANNOT_RE = re.compile(r"\(\s*([\w/]+)\s*,\s*confidence\s*=", re.IGNORECASE)
+        _VALID_TAGS = {"observed", "inferred"}
+        all_tags = [
+            m.group(1).strip().lower()
+            for line in triplet_lines
+            for m in _TAG_ANNOT_RE.finditer(line)
+        ]
+        if all_tags:
+            valid_tag_count = sum(1 for t in all_tags if t in _VALID_TAGS)
+            score += 0.15 * (valid_tag_count / len(all_tags))
 
         # Tautology penalty: subject appears as a substring of the object field,
-        # e.g. "the speaker | is ... | is the speaker" or "x | is | x itself" [0.05]
+        # e.g. "the speaker | is ... | is the speaker" or "x | is | x itself" [0.04]
         def _is_tautological(line: str) -> bool:
             parts = [p.strip().lower() for p in line.split("|")]
             if len(parts) < 3:
@@ -621,7 +653,7 @@ class SPOEvaluator:
 
         # Trivial-predicate penalty: bare copula ('is', 'are', 'was' …) as the
         # entire predicate adds no semantic content and is a known failure mode
-        # where the model copies prompt phrasing rather than extracting a relation.
+        # where the model copies prompt phrasing rather than extracting a relation. [0.04]
         _TRIVIAL_PREDICATES = {"is", "are", "was", "were", "has", "have", "had", "be"}
 
         def _is_trivial_predicate(line: str) -> bool:
@@ -634,7 +666,7 @@ class SPOEvaluator:
         # Predicate-echo-in-object penalty: object field starts with the same
         # token as the predicate (e.g. "x | is | is the correct action"), which
         # indicates a circular definition where the relation is repeated instead
-        # of naming a distinct object.
+        # of naming a distinct object. [0.04]
         def _object_echoes_predicate(line: str) -> bool:
             parts = [p.strip() for p in line.split("|")]
             if len(parts) < 3:
@@ -643,13 +675,25 @@ class SPOEvaluator:
             obj_words = re.sub(r"\(.*?\)", "", parts[2]).strip().lower().split()
             return bool(pred_words and obj_words and pred_words[0] == obj_words[0])
 
+        # Degenerate-subject penalty: subject field is empty or a bare number
+        # (e.g. "1. | is | ..."), which means the model failed to extract a
+        # meaningful entity as the triplet subject. [0.03]
+        def _has_degenerate_subject(line: str) -> bool:
+            parts = [p.strip() for p in line.split("|")]
+            if not parts:
+                return True
+            subject = re.sub(r"\(.*?\)", "", parts[0]).strip()
+            return len(subject) == 0 or bool(re.match(r"^\d+\.?\s*$", subject))
+
         if triplet_lines:
-            taut_ratio   = sum(1 for t in triplet_lines if _is_tautological(t))   / len(triplet_lines)
+            taut_ratio    = sum(1 for t in triplet_lines if _is_tautological(t))      / len(triplet_lines)
             trivial_ratio = sum(1 for t in triplet_lines if _is_trivial_predicate(t)) / len(triplet_lines)
-            echo_ratio   = sum(1 for t in triplet_lines if _object_echoes_predicate(t)) / len(triplet_lines)
-            score += 0.05 * (1.0 - taut_ratio)
-            score += 0.05 * (1.0 - trivial_ratio)
-            score += 0.05 * (1.0 - echo_ratio)
+            echo_ratio    = sum(1 for t in triplet_lines if _object_echoes_predicate(t)) / len(triplet_lines)
+            degen_ratio   = sum(1 for t in triplet_lines if _has_degenerate_subject(t))  / len(triplet_lines)
+            score += 0.04 * (1.0 - taut_ratio)
+            score += 0.04 * (1.0 - trivial_ratio)
+            score += 0.04 * (1.0 - echo_ratio)
+            score += 0.03 * (1.0 - degen_ratio)
 
         # Ground-truth overlap bonus [0.05 max]
         if ground_truth and ground_truth.strip():

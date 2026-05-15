@@ -282,7 +282,7 @@ def run_spo_training(config: SPOTrainingConfig) -> dict:
                     f"avg_confidence={metrics['avg_confidence']:.4f}"
                 )
 
-    model.save_pretrained(output_dir / "adapter")
+    model.save_pretrained(output_dir / "adapter", save_embedding_layers=False)
     tokenizer.save_pretrained(output_dir / "adapter")
 
     # Regression gate: generate actual model outputs on a sample of holdout prompts

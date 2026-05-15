@@ -1,0 +1,64 @@
+{
+  "samples": [
+    {
+      "prompt_snippet": "Given this quote, extract the implicit reasoning.\n\nQuote: \"Love is that conditio",
+      "output": "Non-Entailed Premises:\nhappiness | (observed, confidence=X) | essential to your own\n\nEntailed Premises:\n\n*   | (inferred, confidence=0.7) | happiness | (inferred,confidence=X) | essential to\n\nThroughline:\nLove is that condition inwhich the happiness of another personis essential to your own.",
+      "score": 0.8500000000000002,
+      "header_score": 1.0,
+      "expected_headers": [
+        "Non-Entailed Premises:",
+        "Entailed Premises:",
+        "Throughline:"
+      ]
+    },
+    {
+      "prompt_snippet": "Given this quote, extract the implicit reasoning.\n\nQuote: \"Sometimes, you read a",
+      "output": "Non-Entailed Premises:\nbook | (observed, confidence=X) | inferred, confidence=X.0 | \"evangelical zeal\"\n\nEntailed Premises:\n\nbook | (inferred, confidence=X) | observed, confidence=X.0| inferred, confidence=X.99 | \"evangelical\"\n\nThroughline:\nThe quote implies that the book's content is so compelling that it induces a specific, irrational belief in the future of the world.",
+      "score": 0.8000000000000002,
+      "header_score": 1.0,
+      "expected_headers": [
+        "Non-Entailed Premises:",
+        "Entailed Premises:",
+        "Throughline:"
+      ]
+    },
+    {
+      "prompt_snippet": "Given this quote, extract the implicit reasoning.\n\nQuote: \"Sometimes people are ",
+      "output": "Non-Entailed Premises:\nbeautiful | (observed, confidence=X) | not in looks\n\nEntailed Premises:\n\n*   not in what they say | (inferred, confidence=X) | just in what they are\n\nThroughline:\n*   Just in what they are.",
+      "score": 0.8000000000000002,
+      "header_score": 1.0,
+      "expected_headers": [
+        "Non-Entailed Premises:",
+        "Entailed Premises:",
+        "Throughline:"
+      ]
+    },
+    {
+      "prompt_snippet": "Given this quote, extract the implicit reasoning.\n\nQuote: \"Folks are usually abo",
+      "output": "Non-Entailed Premises:\nFolks | are (inferred, confidence=0.7) | about as happy as they | make | their | minds | up | to | be\n\nEntailed Premises:\n\nFolks | are | usually (inferred, confidence=X) | about as happy | as | they | make | their| minds | up | to| be\n\nThroughline:\nFolks are usually as happy as they make up their minds.",
+      "score": 0.8350000000000001,
+      "header_score": 1.0,
+      "expected_headers": [
+        "Non-Entailed Premises:",
+        "Entailed Premises:",
+        "Throughline:"
+      ]
+    },
+    {
+      "prompt_snippet": "Given this quote, extract the implicit reasoning.\n\nQuote: \"The difference betwee",
+      "output": "Non-Entailed Premises:\ngenius | has (inferred, confidence=0.7) | limits\n\nEntailed Premises:\n\n*   subject | (inferred, confidence=X.X) | object\n*   subject | (observed, confidence=X.X)| object\n*   subject| (inferred, confidence=Y.Y) | object\n\nThroughline:\ngenius has its limits.",
+      "score": 0.8275000000000001,
+      "header_score": 1.0,
+      "expected_headers": [
+        "Non-Entailed Premises:",
+        "Entailed Premises:",
+        "Throughline:"
+      ]
+    }
+  ],
+  "avg_score": 0.8225000000000001,
+  "avg_header_score": 1.0,
+  "min_avg_threshold": 0.5,
+  "min_per_sample_threshold": 0.3,
+  "min_header_threshold": 0.5
+}

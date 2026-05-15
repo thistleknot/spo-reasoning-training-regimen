@@ -3,9 +3,8 @@ Adapter: Convert preprocessed structured data to training format.
 
 Takes clean structured dicts (quote, entailed_premises, non_entailed_premises,
 syllogism) and serializes them to input_text/output_text format suitable for
-training. Numeric confidence is stripped by default so the training target
-teaches premise structure and throughline text, while downstream judges or
-calibrators remain free to assign scores later.
+training. Annotations are normalized to canonical (tag, confidence=X) format
+so the model learns to produce scorer-compatible evidence tags.
 """
 
 import json
@@ -16,6 +15,130 @@ from typing import Optional
 CONFIDENCE_ANNOTATION_RE = re.compile(
     r"\((observed|inferred)\s*,\s*confidence\s*[:=]\s*[^)]+\)"
 )
+
+# Triplet normalization patterns
+_BULLET_RE = re.compile(r'^\s*\*+\s*')
+_QUOTED_FIELD_RE = re.compile(r'^["\u201c\u201d\u2018\u2019]+(.+?)["\u201c\u201d\u2018\u2019]+$')
+_BAR_ANNOT_RE = re.compile(
+    r'(observed|inferred)\s*\|+\s*confidence\s*=\s*([0-9]+(?:\.[0-9]+)?)',
+    re.IGNORECASE,
+)
+_BARE_TAG_RE = re.compile(r'\|\s*(observed|inferred)\s*\|', re.IGNORECASE)
+_COMBINED_TAG_RE = re.compile(r'observed\s*\|+\s*inferred|inferred\s*\|+\s*observed', re.IGNORECASE)
+_TEMPLATE_RE = re.compile(r'<subject>|<relation>|<object>|<[a-z_]+>', re.IGNORECASE)
+
+# Default confidence values by tag
+_TAG_DEFAULTS = {"observed": "1.0", "inferred": "0.7"}
+
+
+def _clean_field(field: str) -> str:
+    """Strip surrounding quotes and leading bullet markers from a triplet field."""
+    field = field.strip()
+    m = _QUOTED_FIELD_RE.match(field)
+    if m:
+        field = m.group(1).strip()
+    return field
+
+
+def normalize_triplet(triplet: str) -> Optional[str]:
+    """Normalize a raw triplet string to canonical (tag, confidence=X) annotation format.
+
+    Preconditions:
+        triplet is one line of a premise section.
+    Postconditions:
+        Returns a normalized string ``subject | (tag, confidence=X) | object``
+        where tag is exactly 'observed' or 'inferred' and confidence is a float
+        in [0, 1], or None if the triplet is malformed/template/degenerate.
+    Failure modes:
+        Returns None for template placeholders, lines without exactly 3 pipe-delimited
+        fields, or lines where any field is empty after cleaning.
+    """
+    line = _BULLET_RE.sub('', triplet).strip()
+
+    if _TEMPLATE_RE.search(line):
+        return None
+
+    if line.count('|') < 2:
+        return None
+
+    parts = [p.strip() for p in line.split('|', 2)]
+    if len(parts) != 3:
+        return None
+
+    subject, relation, obj = parts
+    subject = _clean_field(subject)
+    obj = _clean_field(obj)
+
+    if not subject or not obj:
+        return None
+
+    # Case 1: already has canonical (tag, confidence=X) in the relation — keep relation as-is.
+    if CONFIDENCE_ANNOTATION_RE.search(relation):
+        # Ensure the tag inside is valid (not combined); replace invalid combined tags.
+        clean_rel = _COMBINED_TAG_RE.sub('inferred', relation)
+        return f"{subject} | {clean_rel.strip()} | {obj}"
+
+    # Case 2: bar format  inferred|confidence=0.8  →  build canonical annotation.
+    bar_match = _BAR_ANNOT_RE.search(relation)
+    if bar_match:
+        raw_tag = bar_match.group(1).lower()
+        raw_conf = bar_match.group(2)
+        try:
+            conf_f = float(raw_conf)
+            conf = raw_conf if 0.0 <= conf_f <= 1.0 else _TAG_DEFAULTS[raw_tag]
+        except ValueError:
+            conf = _TAG_DEFAULTS[raw_tag]
+        tag = "observed" if raw_tag == "observed" else "inferred"
+        # Strip the bar annotation, append canonical parens annotation.
+        semantic = _BAR_ANNOT_RE.sub('', relation).strip().rstrip('|').strip()
+        annot = f"({tag}, confidence={conf})"
+        relation_clean = f"{semantic} {annot}".strip() if semantic else annot
+        return f"{subject} | {relation_clean} | {obj}"
+
+    # Case 3: combined tag  observed|inferred  →  conservative inferred default.
+    if _COMBINED_TAG_RE.search(relation):
+        semantic = _COMBINED_TAG_RE.sub('', relation).strip()
+        annot = "(inferred, confidence=0.7)"
+        relation_clean = f"{semantic} {annot}".strip() if semantic else annot
+        return f"{subject} | {relation_clean} | {obj}"
+
+    # Case 4: bare tag  | observed |  or  | inferred |  (tag IS the whole relation field).
+    bare_match = _BARE_TAG_RE.search(f'|{relation}|')
+    if bare_match:
+        raw_tag = bare_match.group(1).lower()
+        tag = "observed" if raw_tag == "observed" else "inferred"
+        annot = f"({tag}, confidence={_TAG_DEFAULTS[tag]})"
+        # relation may be just the tag word or may have extra semantic content
+        semantic = re.sub(r'\b(observed|inferred)\b', '', relation, flags=re.IGNORECASE).strip()
+        relation_clean = f"{semantic} {annot}".strip() if semantic else annot
+        return f"{subject} | {relation_clean} | {obj}"
+
+    # Case 5: tag keyword found somewhere in relation (e.g. "implies (inferred)").
+    tag_search = re.search(r'\b(observed|inferred)\b', relation, re.IGNORECASE)
+    if tag_search:
+        raw_tag = tag_search.group(1).lower()
+        tag = "observed" if raw_tag == "observed" else "inferred"
+        existing_conf = re.search(r'confidence\s*=\s*([0-9.]+)', relation)
+        if existing_conf:
+            conf = existing_conf.group(1)
+            try:
+                conf_f = float(conf)
+                conf = conf if 0.0 <= conf_f <= 1.0 else _TAG_DEFAULTS[tag]
+            except ValueError:
+                conf = _TAG_DEFAULTS[tag]
+        else:
+            conf = _TAG_DEFAULTS[tag]
+        # Remove bare tag word, strip old annotation if any, append canonical
+        semantic = re.sub(r'\b(observed|inferred)\b', '', relation, flags=re.IGNORECASE).strip()
+        semantic = re.sub(r'\(.*?\)', '', semantic).strip()
+        annot = f"({tag}, confidence={conf})"
+        relation_clean = f"{semantic} {annot}".strip() if semantic else annot
+        return f"{subject} | {relation_clean} | {obj}"
+
+    # Case 6: no tag found — semantic predicate only, default to inferred.
+    annot = "(inferred, confidence=0.7)"
+    relation_clean = f"{relation.strip()} {annot}".strip() if relation.strip() else annot
+    return f"{subject} | {relation_clean} | {obj}"
 
 
 def normalize_quote_text(quote: str) -> str:
@@ -78,26 +201,31 @@ def strip_confidence_annotation(triplet: str) -> str:
 
 def triplets_to_text(
     triplets: Optional[list[str]],
-    include_confidence: bool = False,
 ) -> str:
-    """Convert a list of triplets to text format for training."""
+    """Normalize and join triplets to text for training output.
+
+    Each triplet is normalized to canonical (tag, confidence=X) format.
+    Invalid/template/degenerate triplets are dropped.  Returns 'N/A' only
+    when no valid triplets remain.
+
+    Preconditions:
+        triplets is a list of raw triplet strings from the structured corpus.
+    Guarantee:
+        Returned lines match ``subject | (tag, confidence=X) | object`` format.
+    """
     if not triplets:
         return "N/A"
 
     lines = []
     for triplet in triplets:
-        if include_confidence:
-            lines.append(triplet)
-        else:
-            lines.append(strip_confidence_annotation(triplet))
+        normalized = normalize_triplet(triplet)
+        if normalized:
+            lines.append(normalized)
 
-    return "\n".join(lines)
+    return "\n".join(lines) if lines else "N/A"
 
 
-def serialize_training_record(
-    structured_record: dict,
-    include_confidence: bool = False,
-) -> dict:
+def serialize_training_record(structured_record: dict) -> dict:
     """Convert structured record to input_text/output_text format for training.
 
     Training format uses pedagogical ordering:
@@ -105,10 +233,11 @@ def serialize_training_record(
     - Entailed Premises second (teaches positive inference)
     - Throughline last (the conclusion)
 
+    Triplets are normalized to canonical (tag, confidence=X) annotation format
+    so the model learns scorer-compatible output.
+
     Args:
-        structured_record: {quote, entailed_premises, non_entailed_premises,
-                           throughline}
-        include_confidence: Preserve numeric confidence in serialized triplets.
+        structured_record: {quote, entailed_premises, non_entailed_premises, syllogism}
 
     Returns:
         {input_text, output_text} for trainer
@@ -116,22 +245,22 @@ def serialize_training_record(
     quote = structured_record.get("quote", "")
     non_entailed = structured_record.get("non_entailed_premises")
     entailed = structured_record.get("entailed_premises")
-    throughline = structured_record.get("syllogism")  # Use syllogism key for now, renamed to throughline in output
-    
+    throughline = structured_record.get("syllogism")
+
     input_text = build_base_reasoning_prompt(quote)
 
     output_lines = [
         "Non-Entailed Premises:",
-        triplets_to_text(non_entailed, include_confidence=include_confidence),
+        triplets_to_text(non_entailed),
         "",
         "Entailed Premises:",
-        triplets_to_text(entailed, include_confidence=include_confidence),
+        triplets_to_text(entailed),
         "",
         "Throughline:",
-        throughline or "N/A",
+        throughline.strip() if throughline and throughline.strip() else "N/A",
     ]
     output_text = "\n".join(output_lines)
-    
+
     return {
         "input_text": input_text,
         "output_text": output_text,
@@ -154,32 +283,63 @@ def is_tautological(record: dict) -> bool:
     return (not e) or (e == ne)
 
 
+def is_bad_record(record: dict) -> bool:
+    """Return True when a record should be excluded from training.
+
+    Filters:
+    - Template placeholders in any triplet (model would learn to echo `<subject>` etc.)
+    - Missing or N/A-only throughline (trains the model to output N/A conclusions)
+    - Repetitive triplets: any single triplet repeated 3+ times (degenerate data)
+
+    Require: record follows {entailed_premises, non_entailed_premises, syllogism} schema.
+    Guarantee: returns bool; never raises.
+    """
+    all_trips = (record.get("entailed_premises") or []) + (record.get("non_entailed_premises") or [])
+
+    if any(_TEMPLATE_RE.search(t) for t in all_trips):
+        return True
+
+    syl = (record.get("syllogism") or "").strip()
+    if not syl or syl.upper() in ("N/A", "NA", ""):
+        return True
+
+    counts: dict[str, int] = {}
+    for t in all_trips:
+        counts[t] = counts.get(t, 0) + 1
+    if any(v >= 3 for v in counts.values()):
+        return True
+
+    return False
+
+
 def convert_preprocessed_to_training(
     input_file: str,
     output_file: str,
-    include_confidence: bool = False,
     filter_tautological: bool = True,
 ) -> dict:
     """Convert preprocessed structured JSONL to training format JSONL.
 
+    Applies all quality gates: tautological filter, template/N/A/repetitive filter,
+    and triplet normalization (canonical annotation format).
+
     Args:
         input_file: Preprocessed structured JSONL
         output_file: Training format JSONL
-        include_confidence: Preserve numeric confidence in serialized training rows.
         filter_tautological: Skip records where entailed == non_entailed or
-            entailed is empty.  Default True — tautological records teach no
-            distinction between load-bearing and contextual premises.
+            entailed is empty.  Default True.
 
     Returns:
-        Statistics dict with keys: total, converted, skipped_tautological, errors
+        Statistics dict with keys: total, converted, skipped_tautological,
+        skipped_bad, errors
     """
     stats = {
         "total": 0,
         "converted": 0,
         "skipped_tautological": 0,
+        "skipped_bad": 0,
         "errors": 0,
     }
-    
+
     with open(input_file) as infile, open(output_file, "w") as outfile:
         for line in infile:
             try:
@@ -190,54 +350,55 @@ def convert_preprocessed_to_training(
                     stats["skipped_tautological"] += 1
                     continue
 
-                training_record = serialize_training_record(
-                    structured,
-                    include_confidence=include_confidence,
-                )
-                
+                if is_bad_record(structured):
+                    stats["skipped_bad"] += 1
+                    continue
+
+                training_record = serialize_training_record(structured)
+
+                # Post-normalization: skip if either section ended up empty after normalization
+                if "N/A" in training_record["output_text"].split("Entailed Premises:\n")[1][:4]:
+                    stats["skipped_bad"] += 1
+                    continue
+
                 outfile.write(json.dumps(training_record) + "\n")
                 stats["converted"] += 1
-                
+
                 if stats["converted"] % 200 == 0:
                     print(f"Converted {stats['converted']}...")
-            
+
             except Exception as e:
                 stats["errors"] += 1
                 print(f"Error converting record: {e}")
-    
+
     return stats
 
 
 if __name__ == "__main__":
     import argparse
-    
+
     parser = argparse.ArgumentParser(
         description="Convert preprocessed data to training format"
     )
     parser.add_argument("--input", required=True, help="Preprocessed structured JSONL")
     parser.add_argument("--output", required=True, help="Training format JSONL")
     parser.add_argument(
-        "--include-confidence",
-        action="store_true",
-        help="Keep numeric confidence annotations in the serialized training rows",
-    )
-    parser.add_argument(
         "--no-filter-tautological",
         action="store_true",
         help="Keep records where entailed_premises == non_entailed_premises (default: filter them out)",
     )
-    
+
     args = parser.parse_args()
-    
+
     stats = convert_preprocessed_to_training(
         args.input,
         args.output,
-        include_confidence=args.include_confidence,
         filter_tautological=not args.no_filter_tautological,
     )
-    
+
     print("\n=== CONVERSION STATISTICS ===")
     print(f"Total: {stats['total']}")
     print(f"Converted: {stats['converted']}")
     print(f"Skipped (tautological): {stats['skipped_tautological']}")
+    print(f"Skipped (bad record): {stats['skipped_bad']}")
     print(f"Errors: {stats['errors']}")

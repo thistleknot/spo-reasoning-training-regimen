@@ -88,10 +88,10 @@ Response:"""
     output_text = "\n".join(
         [
             "Non-Entailed Premises:",
-            triplets_to_text(non_entailed, include_confidence=True),
+            triplets_to_text(non_entailed),
             "",
             "Entailed Premises:",
-            triplets_to_text(entailed, include_confidence=True),
+            triplets_to_text(entailed),
         ]
     )
 
@@ -133,10 +133,10 @@ def serialize_syllogism_with_confidence_record(structured_record: dict) -> dict:
             f'Quote: "{quote}"',
             "",
             "Non-Entailed Premises:",
-            triplets_to_text(non_entailed, include_confidence=True),
+            triplets_to_text(non_entailed),
             "",
             "Entailed Premises:",
-            triplets_to_text(entailed, include_confidence=True),
+            triplets_to_text(entailed),
             "",
             "Generate a response with:",
             "1. Throughline",

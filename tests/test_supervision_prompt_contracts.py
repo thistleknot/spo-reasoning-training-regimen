@@ -30,7 +30,7 @@ class SupervisionPromptContractTests(unittest.TestCase):
     """Lock the prompt instructions for each training regimen."""
 
     def test_base_reasoning_prompt_contract(self) -> None:
-        """Base reasoning should use the explicit instruction prompt and stripped scores."""
+        """Base reasoning uses explicit instruction prompt with confidence annotations."""
         record = serialize_training_record(make_structured_record())
 
         self.assertEqual(
@@ -46,8 +46,20 @@ class SupervisionPromptContractTests(unittest.TestCase):
                     "2. Entailed Premises",
                     "3. Throughline",
                     "",
-                    "Format each premise as: subject | relation (tag) | object",
+                    "Format each premise as: subject | relation (tag, confidence=X) | object",
                     '- tag: "observed" for explicit facts, "inferred" for derived facts',
+                    "- confidence: 1.0 for observed facts, 0.5-0.9 for inferred",
+                    "",
+                    "VERBATIM EXTRACTION RULE (Entailed Premises only):",
+                    "- Subject and object MUST be exact, verbatim text copied from the quote above.",
+                    "- Do NOT paraphrase, summarize, or invent language for Entailed subject/object fields.",
+                    "- If verbatim text needs clarification, add a parenthetical transliteration",
+                    "  immediately after: verbatim text (clarification if needed)",
+                    '  Example: "unexamined life (a life without self-reflection) | lacks (observed, confidence=1.0) | worth"',
+                    "- Non-Entailed Premises and the Throughline may use your own words.",
+                    "",
+                    "IMPORTANT: The Entailed Premises section MUST contain at least one triplet.",
+                    "Never leave Entailed Premises empty.",
                     "",
                     "Response:",
                 ]
@@ -58,11 +70,11 @@ class SupervisionPromptContractTests(unittest.TestCase):
             "\n".join(
                 [
                     "Non-Entailed Premises:",
-                    "social conformity | is (observed) | undesirable",
+                    "social conformity | is (observed, confidence=1.0) | undesirable",
                     "",
                     "Entailed Premises:",
-                    "people | are (observed) | unique individuals",
-                    "authenticity | is (inferred) | the only way to be oneself",
+                    "people | are (observed, confidence=1.0) | unique individuals",
+                    "authenticity | is (inferred, confidence=0.5) | the only way to be oneself",
                     "",
                     "Throughline:",
                     "One should embrace their own identity rather than imitating others.",

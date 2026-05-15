@@ -111,7 +111,6 @@ def rebuild_canonical_corpora(
     convert_preprocessed_to_training(
         input_file=str(structured_output),
         output_file=str(base_output),
-        include_confidence=False,
     )
     build_training_regimen_dataset(
         input_file=str(structured_output),

@@ -496,6 +496,106 @@ class AssertOutputQualityTests(unittest.TestCase):
         self.assertGreater(score_tagged, score_no_tags)
 
 
+class TestVerbatimFaithfulnessGate(unittest.TestCase):
+    """Lock the verbatim-faithfulness gate for entailed premises."""
+
+    SOURCE = "The unexamined life is not worth living."
+
+    VERBATIM_OUTPUT = (
+        "Non-Entailed Premises:\n"
+        "Socrates | advocated (observed) | self-examination\n"
+        "Entailed Premises:\n"
+        "unexamined life | is (observed) | not worth living\n"
+        "life | requires (inferred) | examination\n"
+        "Throughline:\n"
+        "  A life without reflection has no value.\n"
+    )
+
+    PARAPHRASE_OUTPUT = (
+        "Non-Entailed Premises:\n"
+        "Socrates | advocated (observed) | self-examination\n"
+        "Entailed Premises:\n"
+        "a life lived without scrutiny | is (observed) | without merit\n"
+        "human existence | demands (inferred) | constant reflection\n"
+        "Throughline:\n"
+        "  A life without reflection has no value.\n"
+    )
+
+    PAREN_OUTPUT = (
+        "Non-Entailed Premises:\n"
+        "Socrates | advocated (observed) | critical inquiry\n"
+        "Entailed Premises:\n"
+        "unexamined life (a life without self-reflection) | is (observed) | not worth living\n"
+        "Throughline:\n"
+        "  Reflection is essential.\n"
+    )
+
+    def test_verbatim_entailed_adds_bonus(self) -> None:
+        """Verbatim subject/object in entailed section earns faithfulness bonus."""
+        with_source = SPOEvaluator.evaluate_triplet_correctness(
+            self.VERBATIM_OUTPUT, source_quote=self.SOURCE
+        )
+        without_source = SPOEvaluator.evaluate_triplet_correctness(
+            self.VERBATIM_OUTPUT
+        )
+        self.assertGreater(with_source, without_source)
+
+    def test_paraphrase_entailed_no_bonus(self) -> None:
+        """Paraphrased subject/object receive no verbatim bonus."""
+        verbatim_score = SPOEvaluator.evaluate_triplet_correctness(
+            self.VERBATIM_OUTPUT, source_quote=self.SOURCE
+        )
+        paraphrase_score = SPOEvaluator.evaluate_triplet_correctness(
+            self.PARAPHRASE_OUTPUT, source_quote=self.SOURCE
+        )
+        self.assertGreater(verbatim_score, paraphrase_score)
+
+    def test_parenthetical_stripped_before_check(self) -> None:
+        """Parenthetical transliteration is stripped; base verbatim text still scores."""
+        with_source = SPOEvaluator.evaluate_triplet_correctness(
+            self.PAREN_OUTPUT, source_quote=self.SOURCE
+        )
+        without_source = SPOEvaluator.evaluate_triplet_correctness(
+            self.PAREN_OUTPUT
+        )
+        self.assertGreater(with_source, without_source)
+
+    def test_no_source_quote_unchanged_score(self) -> None:
+        """Omitting source_quote produces the same score as before (backward compat)."""
+        score_a = SPOEvaluator.evaluate_triplet_correctness(self.VERBATIM_OUTPUT)
+        score_b = SPOEvaluator.evaluate_triplet_correctness(
+            self.VERBATIM_OUTPUT, source_quote=None
+        )
+        self.assertAlmostEqual(score_a, score_b)
+
+    def test_extract_section_triplets_isolates_section(self) -> None:
+        """_extract_section_triplets returns only lines from the named section."""
+        entailed = SPOEvaluator._extract_section_triplets(
+            self.VERBATIM_OUTPUT, "Entailed Premises"
+        )
+        self.assertEqual(len(entailed), 2)
+        self.assertTrue(all("|" in line for line in entailed))
+        # Non-Entailed and Throughline must not bleed in
+        for line in entailed:
+            self.assertNotIn("Socrates", line)
+            self.assertNotIn("reflection", line)
+
+    def test_entailed_verbatim_ratio_pure(self) -> None:
+        """_entailed_verbatim_ratio returns 1.0 when all components are verbatim."""
+        lines = SPOEvaluator._extract_section_triplets(
+            self.VERBATIM_OUTPUT, "Entailed Premises"
+        )
+        ratio = SPOEvaluator._entailed_verbatim_ratio(lines, self.SOURCE)
+        self.assertGreater(ratio, 0.5)
+
+    def test_entailed_verbatim_ratio_empty(self) -> None:
+        """_entailed_verbatim_ratio returns 0.0 on empty input."""
+        self.assertEqual(SPOEvaluator._entailed_verbatim_ratio([], self.SOURCE), 0.0)
+        self.assertEqual(
+            SPOEvaluator._entailed_verbatim_ratio(["x | y | z"], ""), 0.0
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
 

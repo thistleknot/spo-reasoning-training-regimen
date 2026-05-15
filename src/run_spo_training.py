@@ -20,6 +20,7 @@ from .run_ablation_matrix import (
     split_indices,
     subset_records,
 )
+from .preprocess_training_data import extract_quote
 from .spo_trainer import PromptContract, SPOEvaluator, SPOTrainer, assert_output_quality
 
 
@@ -83,8 +84,8 @@ def score_training_sample(record: dict) -> float:
 
     Quality signals (blended 50/50):
     - Format quality: evaluate_triplet_correctness on the gold output, which checks
-      headers, pipe-format triplets, confidence annotations, and uniqueness. Examples
-      with correct headers and well-formed triplets teach the model more reliably.
+      headers, pipe-format triplets, confidence annotations, uniqueness, and — when
+      source_quote is available — verbatim faithfulness of entailed premises.
     - Diversity: unique premises ratio, predicate specificity, and subject diversity.
       High-diversity examples provide richer semantic coverage than degenerate ones.
     """
@@ -92,10 +93,13 @@ def score_training_sample(record: dict) -> float:
     if not text or not text.strip():
         return 0.5
 
-    # Format quality on the gold output — rewards correct headers + pipe triplets
+    # Extract source quote for verbatim faithfulness check
     prompt = record.get("input_text", "")
+    source_quote = extract_quote(prompt) if prompt else None
     contract = PromptContract.from_prompt(prompt) if prompt else None
-    format_score = SPOEvaluator.evaluate_triplet_correctness(text, contract=contract)
+    format_score = SPOEvaluator.evaluate_triplet_correctness(
+        text, contract=contract, source_quote=source_quote
+    )
 
     triplet_lines = [
         line.strip()

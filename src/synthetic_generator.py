@@ -55,6 +55,14 @@ Format each premise as: subject | relation (tag, confidence=X) | object
   Write: "life | is (inferred) | a process"  (correct)
   NOT:   "life | is (inferred) | is a process"  (wrong — 'is' appears twice)
 
+VERBATIM EXTRACTION RULE (Entailed Premises only):
+- Subject and object MUST be exact, verbatim text copied from the quote above.
+- Do NOT paraphrase, summarize, or invent language for these fields.
+- If the verbatim text needs clarification, add a parenthetical transliteration
+  immediately after the original term: verbatim text (clarification if needed)
+  Example: "unexamined life (a life without self-reflection) | lacks | worth"
+- Non-Entailed Premises and the Syllogism may use your own words.
+
 Response:
 """
 

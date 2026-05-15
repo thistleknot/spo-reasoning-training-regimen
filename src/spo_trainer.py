@@ -12,6 +12,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
 
+from .span_extractor import find_span
+
 
 @dataclass
 class SPOReward:
@@ -453,10 +455,96 @@ class SPOEvaluator:
         return hits / len(canonical)
 
     @staticmethod
+    def _extract_section_triplets(model_output: str, section_name: str) -> List[str]:
+        """Return the triplet lines belonging to a named section in model_output.
+
+        Scans line-by-line from the first occurrence of ``section_name:`` until
+        the next header-like line (ends with ':', no '|', length ≤ 60) or EOF.
+
+        Require: model_output is a non-empty string; section_name is the header
+                 text without the trailing colon (e.g. "Entailed Premises").
+        Guarantee: returns a list of stripped triplet lines (containing '|') from
+                   that section only; empty list when the section is absent.
+        """
+        triplet_re = re.compile(r"[^|]+\s*\|\s*[^|]+\s*\|\s*[^|]+")
+        lines = model_output.splitlines()
+        in_section = False
+        result: List[str] = []
+        target_header = (section_name + ":").lower()
+        for line in lines:
+            stripped = line.strip()
+            is_header = (
+                stripped.endswith(":")
+                and "|" not in stripped
+                and len(stripped) <= 60
+            )
+            if is_header:
+                if stripped.lower() == target_header:
+                    in_section = True
+                else:
+                    in_section = False
+                continue
+            if in_section and triplet_re.search(stripped):
+                result.append(stripped)
+        return result
+
+    @staticmethod
+    def _entailed_verbatim_ratio(
+        entailed_triplet_lines: List[str],
+        source_quote: str,
+    ) -> float:
+        """Fraction of entailed triplet subject/object fields that are verbatim spans of source_quote.
+
+        For each triplet line, the subject (field 0) and object (field 2) are
+        extracted.  Parenthetical transliterations of the form ``term (clarification)``
+        are stripped so only the base term is checked against source_quote via
+        ``find_span()``.  A component counts as verbatim when ``find_span`` returns
+        a non-None span (coverage ≥ 0.5 match, per span_extractor contract).
+
+        Require:
+            entailed_triplet_lines is a list of '|'-delimited triplet strings.
+            source_quote is non-empty.
+        Guarantee:
+            Returns a float in [0, 1].  Returns 0.0 when the input list is empty
+            or source_quote is blank.  Returns 1.0 when all checked components
+            are verbatim.
+        Failure modes:
+            Single-token subjects/objects that happen to be common English words
+            may match spuriously.  This is acceptable — false positives are benign
+            (over-reward is bounded by the 0.05 weight).
+        """
+        if not entailed_triplet_lines or not source_quote.strip():
+            return 0.0
+
+        _paren_re = re.compile(r"\s*\(.*?\)\s*$")
+
+        def _base_text(field: str) -> str:
+            """Strip parenthetical transliteration and surrounding whitespace."""
+            return _paren_re.sub("", field).strip()
+
+        checked = 0
+        verbatim = 0
+        for line in entailed_triplet_lines:
+            parts = line.split("|")
+            if len(parts) < 3:
+                continue
+            for field_idx in (0, 2):  # subject and object only
+                raw = parts[field_idx]
+                base = _base_text(raw)
+                if not base:
+                    continue
+                checked += 1
+                if find_span(source_quote, base) is not None:
+                    verbatim += 1
+
+        return verbatim / checked if checked > 0 else 0.0
+
+    @staticmethod
     def evaluate_triplet_correctness(
         model_output: str,
         ground_truth: Optional[str] = None,
         contract: Optional["PromptContract"] = None,
+        source_quote: Optional[str] = None,
     ) -> float:
         """Evaluate correctness of triplet-based output.
 
@@ -470,6 +558,15 @@ class SPOEvaluator:
         - Trivial-predicate penalty: bare copula ('is'/'are'/…) as sole predicate [0.05 weight]
         - Predicate-echo-in-object penalty: object starts with predicate token [0.05 weight]
         - Ground-truth overlap via SequenceMatcher if provided [0.05 bonus, capped at 1.0]
+        - Entailed-section verbatim faithfulness when source_quote provided [0.05 bonus, capped at 1.0]
+
+        Section-targeted faithfulness gate:
+        When ``source_quote`` is provided the Entailed Premises section is parsed
+        separately.  Subject and object fields (after stripping any parenthetical
+        transliterations) are checked against the source quote via ``find_span()``.
+        The fraction of verbatim components adds up to 0.05 to the score.  Non-
+        entailed premises and the throughline are deliberately excluded — they are
+        synthesised context, not extractive claims.
 
         When a PromptContract is provided its expected_headers drive the header
         score. This prevents the evaluator drifting out of sync with the prompt.
@@ -554,13 +651,25 @@ class SPOEvaluator:
             score += 0.05 * (1.0 - trivial_ratio)
             score += 0.05 * (1.0 - echo_ratio)
 
-        # Ground-truth overlap bonus [0.1 max]
+        # Ground-truth overlap bonus [0.05 max]
         if ground_truth and ground_truth.strip():
             import difflib
             overlap = difflib.SequenceMatcher(
                 None, model_output.strip(), ground_truth.strip()
             ).ratio()
             score += 0.05 * overlap
+
+        # Entailed-section verbatim faithfulness bonus [0.05 max]
+        # Checks that subject/object base text (after stripping parenthetical
+        # transliterations) appears as a verbatim span of the source quote.
+        if source_quote and source_quote.strip():
+            entailed_lines = SPOEvaluator._extract_section_triplets(
+                model_output, "Entailed Premises"
+            )
+            verbatim_ratio = SPOEvaluator._entailed_verbatim_ratio(
+                entailed_lines, source_quote
+            )
+            score += 0.05 * verbatim_ratio
 
         return min(score, 1.0)
 
@@ -601,6 +710,7 @@ class SPOEvaluator:
         model_output: str,
         ground_truth: Optional[str] = None,
         weights: Optional[Dict[str, float]] = None,
+        source_quote: Optional[str] = None,
     ) -> float:
         """Composite correctness score combining multiple evaluations.
 
@@ -610,6 +720,8 @@ class SPOEvaluator:
             weights: Dict of weights for each metric
                 - "triplet": weight for triplet correctness
                 - "syllogism": weight for syllogism quality
+            source_quote: Optional original quote used to check verbatim faithfulness
+                of entailed premises (passed through to evaluate_triplet_correctness).
 
         Returns:
             Composite score 0.0-1.0
@@ -618,7 +730,7 @@ class SPOEvaluator:
             weights = {"triplet": 0.6, "syllogism": 0.4}
 
         triplet_score = SPOEvaluator.evaluate_triplet_correctness(
-            model_output, ground_truth
+            model_output, ground_truth, source_quote=source_quote
         )
         syllogism_score = SPOEvaluator.evaluate_syllogism_quality(
             model_output, ground_truth

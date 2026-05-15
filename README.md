@@ -495,9 +495,33 @@ The inference examples artifact (`examples/inference_examples.md`) was regenerat
 
 **Diagnostic signature:** a model that passes the gate without these penalties but fails with them, producing headers like `Non-EntailedPremise:` or `Non-Entailed Prems:`, is almost certainly hitting this penalty-vs-prompt-token conflict. Check whether the expected output headers appear verbatim in the prompt before adding any repetition control.
 
+### 8. The eval pipeline must use the exact same generation params as inference — always
+
+The ablation eval (`run_ablation_matrix.py::generate_completion`) had `repetition_penalty=1.3` and `no_repeat_ngram_size=4` baked in even after lesson 7 was documented and the README was updated. The README fix was applied only to `examples/inference_examples.md`; the eval function was never touched. Result: all three ablation experiments returned `avg_quality=0.0` — every single generated output had garbled headers, every single quality check failed. The adapters themselves were fine; the eval was lying.
+
+**Fix:** Treat generation params as a single source of truth. Define them once (e.g. in a config dict or constants module) and import into both the eval script and the inference script. Never copy-paste generation params between files. After changing any generation param in the README or inference path, grep the entire repo for `repetition_penalty`, `no_repeat_ngram_size`, `temperature`, and `do_sample` and audit every occurrence.
+
+**Diagnostic signature:** `avg_quality=0.0` across all experiments when the model is otherwise known-good. Quality collapse on every sample simultaneously points to a systemic eval bug, not model regression.
+
+### 9. SPO reward scoring must be binary for evidence tags — partial credit is a trap
+
+A tempting refinement is to give partial credit when evidence tags are absent (say 0.5 × weight) and penalise mixed tags (say 0.3 × weight) rather than using a hard binary. This sounds principled but introduces a training anti-incentive: the model can now earn 50% of the tag reward by simply omitting tags entirely, which is lower-effort than producing correct ones. Mixed-tag outputs that contain both `observed` and `inferred` in the same parenthetical still earn 30% — another free-point leak.
+
+**Canonical scoring:** `+0.15` if `re.search(r"\b(observed|inferred)\b", output)` matches anywhere in the output, else `0.0`. Binary. Any presence of a valid tag token is rewarded; total absence is not. This preserves the incentive to always include at least one tag while keeping the scorer fast and auditable.
+
+**Rule:** when a reward component is binary in the training data (the gold outputs either have the feature or they don't), keep the reward binary. Introduce graded scoring only when the training data itself exhibits a natural gradient.
+
+### 10. One epoch of SPO is rarely sufficient — watch for quality collapse on hard inputs
+
+After 1 epoch of SPO (436 steps), holdout `avg_correctness=0.958` looks healthy. On easy, well-represented inputs it is. On harder or more abstract quotes the model exhibits: repetition spirals in the Entailed Premises section (15+ near-duplicate triplets), garbled tag variants (`obsined`, `obsed`, `observed/derived`), and bullet-point format leakage (`*   Subject | pred | obj`) from the base model's instruction-tuned prior.
+
+These failure modes do not appear in the holdout metrics because the holdout set is drawn from the same distribution as the training data. They appear on out-of-distribution inputs.
+
+**Fix:** Run SPO for at least 2–3 epochs. Monitor the *variance* of per-step reward across training batches, not just the mean — if variance collapses early, the model has found a local optimum that scores well on template compliance but hasn't generalised. Manually run inference on 3–5 diverse held-out quotes (not from the training distribution) at the end of each epoch before declaring done.
+
 ### Takeaway
 
-For any RL-from-feedback training loop: (1) generation controls must prevent degenerate outputs before rewards are ever computed, (2) reward functions must explicitly penalise known failure modes rather than only rewarding the ideal case, (3) reward signals computed from gold data are always suspect — check that the distribution of rewards across your training set actually varies before assuming SPO is doing anything useful, (4) offline preference optimisation cannot correct a habit the model has never been penalised for producing — if the failure mode is a specific generated token sequence, only online generation-and-penalise RL can reliably fix it, (5) for small models, multi-regimen training on semantically overlapping formats requires stratified sampling across (regimen × prompt-length) strata — without it, whichever regimen dominates the data mix will corrupt the shared header vocabulary for the other regimens, (6) post-training evaluation scripts must mirror the exact prompt-format pipeline used during training — a chat-template mismatch produces NO_HEADER silently, and (7) `repetition_penalty` corrupts structured headers whenever those headers appear verbatim in the prompt instruction list — use `no_repeat_ngram_size=6` instead.
+For any RL-from-feedback training loop: (1) generation controls must prevent degenerate outputs before rewards are ever computed, (2) reward functions must explicitly penalise known failure modes rather than only rewarding the ideal case, (3) reward signals computed from gold data are always suspect — check that the distribution of rewards across your training set actually varies before assuming SPO is doing anything useful, (4) offline preference optimisation cannot correct a habit the model has never been penalised for producing — if the failure mode is a specific generated token sequence, only online generation-and-penalise RL can reliably fix it, (5) for small models, multi-regimen training on semantically overlapping formats requires stratified sampling across (regimen × prompt-length) strata — without it, whichever regimen dominates the data mix will corrupt the shared header vocabulary for the other regimens, (6) post-training evaluation scripts must mirror the exact prompt-format pipeline used during training — a chat-template mismatch produces NO_HEADER silently, (7) `repetition_penalty` corrupts structured headers whenever those headers appear verbatim in the prompt instruction list — use `no_repeat_ngram_size=6` instead, (8) eval pipeline generation params must be identical to inference params — a README fix that never propagates to the eval script produces `avg_quality=0.0` silently, (9) evidence tag rewards must be binary — partial credit for missing tags leaks reward and degrades the tagging incentive, and (10) one epoch of SPO is not enough for quality generalisation — validate on out-of-distribution inputs at each epoch boundary, not just on holdout metrics.
 
 ---
 

@@ -41,7 +41,7 @@ class PipelineConfig:
     pedagogical_order: bool = True  # Non-Entailed → Entailed → Throughline
 
     # QLoRA training
-    model_name: str = "Qwen/Qwen3-0.6B"
+    model_name: str = "Qwen/Qwen3.5-0.8B"
     lora_rank: int = 32
     lora_alpha: int = 64
     batch_size: int = 2
@@ -290,7 +290,7 @@ def main():
     config = PipelineConfig(
         generate_dataset=True,
         quotes_path=Path("data/sample_quotes.txt"),
-        model_name="Qwen/Qwen3-0.6B",
+        model_name="Qwen/Qwen3.5-0.8B",
         num_epochs=3,
         use_spo=False,  # Set to True for SPO fine-tuning
     )

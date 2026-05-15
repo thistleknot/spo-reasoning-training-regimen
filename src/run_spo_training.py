@@ -30,7 +30,7 @@ class SPOTrainingConfig:
     adapter_path: str
     dataset_path: str = "data/train_facts_with_confidence_967.jsonl"
     output_dir: str = "output/spo_training"
-    model_name: str = "Qwen/Qwen3-0.6B"
+    model_name: str = "Qwen/Qwen3.5-0.8B"
     evaluation_metric: str = "triplet"
     holdout_fraction: float = 0.1
     seed: int = 42
@@ -355,7 +355,7 @@ if __name__ == "__main__":
     parser.add_argument("--adapter-path", required=True, help="Starting PEFT adapter directory")
     parser.add_argument("--dataset-path", default="data/train_facts_with_confidence_967.jsonl")
     parser.add_argument("--output-dir", default="output/spo_training")
-    parser.add_argument("--model-name", default="Qwen/Qwen3-0.6B")
+    parser.add_argument("--model-name", default="Qwen/Qwen3.5-0.8B")
     parser.add_argument(
         "--evaluation-metric",
         default="triplet",

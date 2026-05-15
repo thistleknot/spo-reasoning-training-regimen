@@ -25,7 +25,7 @@ def load_model_and_tokenizer(adapter_path: str):
         adapter_path,
         device_map="auto"
     )
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3.5-0.8B")
     return model, tokenizer
 
 

@@ -56,7 +56,7 @@ CONFIDENCE_RE = re.compile(r"Confidence:\s*([0-9]*\.?[0-9]+)")
 class AblationConfig:
     """Runtime configuration for the ablation matrix."""
 
-    model_name: str = "Qwen/Qwen3-0.6B"
+    model_name: str = "Qwen/Qwen3.5-0.8B"
     output_dir: str = "output/ablations"
     holdout_fraction: float = 0.1
     seed: int = 42
@@ -329,8 +329,7 @@ def generate_completion(model, tokenizer, prompt: str, max_new_tokens: int) -> s
             pad_token_id=tokenizer.pad_token_id,
             eos_token_id=tokenizer.eos_token_id,
             use_cache=True,
-            repetition_penalty=1.3,
-            no_repeat_ngram_size=4,
+            no_repeat_ngram_size=6,
         )
     decoded = tokenizer.decode(
         outputs[0][inputs["input_ids"].shape[1] :],
@@ -713,7 +712,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Run the confidence-regimen ablation matrix")
-    parser.add_argument("--model-name", default="Qwen/Qwen3-0.6B")
+    parser.add_argument("--model-name", default="Qwen/Qwen3.5-0.8B")
     parser.add_argument("--output-dir", default="output/ablations")
     parser.add_argument("--holdout-fraction", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)

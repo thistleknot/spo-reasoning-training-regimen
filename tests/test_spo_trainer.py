@@ -458,6 +458,43 @@ class AssertOutputQualityTests(unittest.TestCase):
             min_header_score=0.5,
         )
 
+    def test_mixed_tags_penalised(self) -> None:
+        """Output with only mixed (observed+inferred) tags still gets the evidence credit — any tag present counts."""
+        mixed = (
+            "Non-Entailed Premises:\n"
+            "difficulty | is (observed, inferred) | a challenge\n"
+            "Entailed Premises:\n"
+            "growth | requires (observed, inferred) | facing difficulty\n"
+            "Throughline:\n"
+            "Difficulties contain opportunities.\n"
+        )
+        score = SPOEvaluator.evaluate_triplet_correctness(mixed)
+        # 'observed' and 'inferred' both present → evidence credit granted (binary)
+        self.assertGreater(score, 0.0)
+
+    def test_no_tags_partial_credit(self) -> None:
+        """Output with no evidence tags receives zero tag credit."""
+        no_tags = (
+            "Non-Entailed Premises:\n"
+            "difficulty | is | a challenge\n"
+            "Entailed Premises:\n"
+            "growth | requires | facing difficulty\n"
+            "Throughline:\n"
+            "Difficulties contain opportunities.\n"
+        )
+        # With headers but no tags: triplet + header credit, zero confidence + zero tag
+        score_no_tags = SPOEvaluator.evaluate_triplet_correctness(no_tags)
+        tagged = (
+            "Non-Entailed Premises:\n"
+            "difficulty | is (observed) | a challenge\n"
+            "Entailed Premises:\n"
+            "growth | requires (inferred) | facing difficulty\n"
+            "Throughline:\n"
+            "Difficulties contain opportunities.\n"
+        )
+        score_tagged = SPOEvaluator.evaluate_triplet_correctness(tagged)
+        self.assertGreater(score_tagged, score_no_tags)
+
 
 if __name__ == "__main__":
     unittest.main()

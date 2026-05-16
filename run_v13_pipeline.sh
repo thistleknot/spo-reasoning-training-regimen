@@ -5,12 +5,12 @@
 #   1. Generate transliteration triplets for every entailed premise in
 #      data/train_structured_verbatim_v12.jsonl → v13 structured corpus
 #   2. Rebuild the filtered training corpus via serialize_training_format
-#   3. Run the training ladder (tier 3 only from v12d tier2 adapter)
+#   2b. PRE-FLIGHT corpus validation — fast sample check before committing to
+#       the full training run; aborts early on bad corpus quality
+#   3. Run the training ladder (tier 3 only from v12c tier2 adapter)
 #
 # Usage:
 #   bash run_v13_pipeline.sh [base_adapter_path]
-#
-# Default base adapter: output/ladder_run_v12d/tier2_content/adapter
 
 set -euo pipefail
 
@@ -35,6 +35,55 @@ $PYTHON -m src.serialize_training_format \
     --input  "$STRUCTURED_V13" \
     --output "$FACTS_V13"
 
+echo ""
+echo "=== Step 2b: Pre-flight corpus validation (sample=50) ==="
+$PYTHON - <<'PREFLIGHT'
+import json, re, sys
+from pathlib import Path
+
+tag_conf_re = re.compile(r'\(\s*(observed|inferred)\s*,\s*confidence\s*=\s*[0-9]', re.IGNORECASE)
+triplet_re  = re.compile(r'^[^|]+\|[^|]+\|[^|]+$')
+
+records = [json.loads(l) for l in Path("data/train_facts_verbatim_v13.jsonl").open()]
+sample  = records[:50]
+
+issues = []
+for i, r in enumerate(sample):
+    out = r.get("output_text", "")
+    # Must have all 3 headers
+    for hdr in ("Non-Entailed Premises:", "Entailed Premises:", "Throughline:"):
+        if hdr not in out:
+            issues.append(f"record {i}: missing header '{hdr}'")
+    # All triplet lines in output must have confidence annotations
+    for line in out.splitlines():
+        line = line.strip()
+        if not line or line.endswith(":"):
+            continue
+        # Skip transliteration lines (start with '(')
+        if line.startswith("(") and line.endswith(")"):
+            continue
+        if triplet_re.match(line):
+            if "confidence=" not in line:
+                issues.append(f"record {i}: triplet missing confidence: {line[:80]}")
+                break
+
+# Transliteration coverage
+with_tl = sum(1 for r in sample if "\n(" in r.get("output_text",""))
+tl_pct  = 100 * with_tl / len(sample)
+
+print(f"Sample: {len(sample)} records")
+print(f"Transliteration coverage: {with_tl}/{len(sample)} ({tl_pct:.1f}%)")
+print(f"Format issues found: {len(issues)}")
+for iss in issues[:5]:
+    print(f"  ! {iss}")
+
+if len(issues) > 5:
+    print(f"  ... and {len(issues)-5} more")
+    sys.exit(1)
+print("Pre-flight PASSED — proceeding to training.")
+PREFLIGHT
+
+echo ""
 RECORD_COUNT=$($PYTHON -c "
 import json, pathlib
 count = sum(1 for _ in pathlib.Path('$FACTS_V13').open())
@@ -43,7 +92,7 @@ print(count)
 echo "Training corpus: $RECORD_COUNT records → $FACTS_V13"
 
 echo ""
-echo "=== Step 3: Run training ladder (tier 3 only from v12d tier2 adapter) ==="
+echo "=== Step 3: Run training ladder (tier 3 only from v12c tier2 adapter) ==="
 $PYTHON -m src.training_ladder \
     --base-adapter "$BASE_ADAPTER" \
     --corpus       "$FACTS_V13" \

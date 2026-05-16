@@ -26,6 +26,14 @@ _BAR_ANNOT_RE = re.compile(
 _BARE_TAG_RE = re.compile(r'\|\s*(observed|inferred)\s*\|', re.IGNORECASE)
 _COMBINED_TAG_RE = re.compile(r'observed\s*\|+\s*inferred|inferred\s*\|+\s*observed', re.IGNORECASE)
 _TEMPLATE_RE = re.compile(r'<subject>|<relation>|<object>|<[a-z_]+>', re.IGNORECASE)
+# Non-numeric confidence values: catches confidence=X.X, confidence=Y.Y, confidence=N, etc.
+_BAD_CONF_RE = re.compile(r'confidence\s*=\s*[A-Za-z]', re.IGNORECASE)
+# Strips any leading "confidence=N.N" or "confidence=X.X" fragment from a relation field.
+# This removes bootstrap artifacts like ", confidence=0.0 (inferred, confidence=0.7)" → "(inferred, confidence=0.7)"
+# and ", confidence=X.X (observed, confidence=1.0)" → "(observed, confidence=1.0)".
+_STRIP_LEADING_CONF_RE = re.compile(
+    r'^,?\s*confidence\s*=\s*[^\s,)(]+\s*', re.IGNORECASE
+)
 
 # Default confidence values by tag
 _TAG_DEFAULTS = {"observed": "1.0", "inferred": "0.7"}
@@ -75,8 +83,11 @@ def normalize_triplet(triplet: str) -> Optional[str]:
 
     # Case 1: already has canonical (tag, confidence=X) in the relation — keep relation as-is.
     if CONFIDENCE_ANNOTATION_RE.search(relation):
+        # Strip any leading "confidence=N.N" artifact that may precede the canonical tag
+        # (e.g. bootstrap-inserted ", confidence=0.0 (inferred, confidence=0.7)" → the tag only).
+        clean_rel = _STRIP_LEADING_CONF_RE.sub('', relation).strip()
         # Ensure the tag inside is valid (not combined); replace invalid combined tags.
-        clean_rel = _COMBINED_TAG_RE.sub('inferred', relation)
+        clean_rel = _COMBINED_TAG_RE.sub('inferred', clean_rel)
         return f"{subject} | {clean_rel.strip()} | {obj}"
 
     # Case 2: bar format  inferred|confidence=0.8  →  build canonical annotation.
@@ -111,6 +122,7 @@ def normalize_triplet(triplet: str) -> Optional[str]:
         annot = f"({tag}, confidence={_TAG_DEFAULTS[tag]})"
         # relation may be just the tag word or may have extra semantic content
         semantic = re.sub(r'\b(observed|inferred)\b', '', relation, flags=re.IGNORECASE).strip()
+        semantic = re.sub(r',?\s*confidence\s*=\s*[^\s,)(]+', '', semantic).strip().lstrip(',').strip()
         relation_clean = f"{semantic} {annot}".strip() if semantic else annot
         return f"{subject} | {relation_clean} | {obj}"
 
@@ -132,6 +144,8 @@ def normalize_triplet(triplet: str) -> Optional[str]:
         # Remove bare tag word, strip old annotation if any, append canonical
         semantic = re.sub(r'\b(observed|inferred)\b', '', relation, flags=re.IGNORECASE).strip()
         semantic = re.sub(r'\(.*?\)', '', semantic).strip()
+        # Also strip bare "confidence=N.N" fragment left after removing the tag word.
+        semantic = re.sub(r',?\s*confidence\s*=\s*[^\s,)(]+', '', semantic).strip().lstrip(',').strip()
         annot = f"({tag}, confidence={conf})"
         relation_clean = f"{semantic} {annot}".strip() if semantic else annot
         return f"{subject} | {relation_clean} | {obj}"
@@ -306,6 +320,10 @@ def is_bad_record(record: dict) -> bool:
     if any(_TEMPLATE_RE.search(t) for t in all_trips):
         return True
 
+    # Non-numeric confidence placeholders (confidence=X.X, confidence=N, etc.)
+    if any(_BAD_CONF_RE.search(t) for t in all_trips):
+        return True
+
     syl = (record.get("syllogism") or "").strip()
     if not syl or syl.upper() in ("N/A", "NA", ""):
         return True
@@ -365,6 +383,11 @@ def convert_preprocessed_to_training(
 
                 # Post-normalization: skip if either section ended up empty after normalization
                 if "N/A" in training_record["output_text"].split("Entailed Premises:\n")[1][:4]:
+                    stats["skipped_bad"] += 1
+                    continue
+
+                # Post-normalization: skip if any non-numeric confidence values leaked through
+                if _BAD_CONF_RE.search(training_record["output_text"]):
                     stats["skipped_bad"] += 1
                     continue
 

@@ -328,7 +328,7 @@ def _make_tiers() -> list[TierSpec]:
         ),
         TierSpec(
             name="tier3_convergence",
-            n_train=0, n_epochs=5, n_holdout=20, lr=1e-5,
+            n_train=0, n_epochs=5, n_holdout=20, lr=2e-5,
             max_new_tokens=512,
             checks=tier3_checks,
             # Full training: structure near-ceiling, annotation mostly canonical.

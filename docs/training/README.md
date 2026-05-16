@@ -635,6 +635,32 @@ if any line contains both words. Thresholds are calibrated per tier from empiric
 - **Tier 2** (200×2ep): 87% — mid-training instability produces transient `(inferred|observed,...)` patterns → threshold 0.85
 - **Tier 3** (900×5ep): 95% (n=20, wide CI) → threshold 0.90 for safety
 
+### 6. The predicate is verbatim too — format is S|P(tag)|O, not S|(tag)|O
+
+**Problem:** The original `build_base_reasoning_prompt()` description said:
+`subject | (tag, confidence=N) | object` — no predicate in the middle field.
+The inline example contradicted this (`lacks (observed, confidence=1.0)` has a predicate),
+but the description dominated during generation. Measured on v9 corpus: **76.9% of triplet
+lines had no predicate at all** — just a bare `(tag, confidence=N)` annotation in the middle.
+
+**Rule:** The canonical format is `subject | predicate (tag, confidence=N) | object`.
+Stripping all `(...)` from any triplet must yield pure verbatim text from the quote:
+```
+"Don't be | satisfied with (inferred, confidence=0.7) | stories"
+               ↑ predicate is verbatim             ↑
+```
+- For **Entailed Premises**: all three fields (S, P, O) must be verbatim spans from the source
+  quote. Parenthetical clarifications like `term (meaning)` are allowed *after* the verbatim word.
+- For **Non-Entailed Premises** and **Throughline**: the format rule holds but verbatim is not required.
+
+**Changes made:**
+- `build_base_reasoning_prompt()`: format description updated; two examples shown;
+  invariant rule added explicitly
+- `generate_verbatim_corpus.py`: `SYSTEM_PROMPT` and `build_prompt()` now require verbatim predicate
+- `_entailed_verbatim_ratio()`: now checks field 1 (predicate) in addition to fields 0 and 2;
+  bare-tag lines (`(observed, confidence=1.0)` with no predicate prefix) are skipped
+- Corpus regeneration v10 required: v9 corpus has inconsistent predicate presence
+
 ### Empirical baselines (all tiers, v9 corpus — confirmed with holdout inference)
 
 | Check | Tier 0 (zero-shot) | Tier 1 (50×1ep) | Tier 2 (200×2ep) | Tier 3 (900×5ep) |

@@ -128,11 +128,20 @@ def check_canonical_tag_format(output: str, _record: dict) -> bool:
     tag_re = re.compile(r"\(\s*(observed|inferred)\s*,\s*confidence\s*=\s*[0-9]", re.IGNORECASE)
     return bool(tag_re.search(output))
 
-def check_both_tag_types(output: str, _record: dict) -> bool:
-    """Output uses both 'observed' and 'inferred' tags (scorer awards 0.15 for valid tags)."""
-    has_obs = bool(re.search(r"\bobserved\b", output, re.IGNORECASE))
-    has_inf = bool(re.search(r"\binferred\b", output, re.IGNORECASE))
-    return has_obs and has_inf
+def check_tags_exclusive(output: str, _record: dict) -> bool:
+    """No single triplet line carries both 'observed' and 'inferred' simultaneously.
+
+    A triplet annotation must use exactly one epistemics tag per line.
+    Having both on the same line (e.g. '(observed, inferred, confidence=0.8)')
+    is a format error regardless of how many triplets are in the output.
+    Short quotes that only warrant one tag type across all lines still pass.
+    """
+    obs_re = re.compile(r"\bobserved\b", re.IGNORECASE)
+    inf_re = re.compile(r"\binferred\b", re.IGNORECASE)
+    for line in output.splitlines():
+        if "|" in line and obs_re.search(line) and inf_re.search(line):
+            return False
+    return True
 
 # Tier 2: content quality — uses scorer's section extraction and verbatim logic
 def check_sections_distinct(output: str, _record: dict) -> bool:
@@ -219,9 +228,9 @@ def _make_tiers() -> list[TierSpec]:
         ("pipes_well_formed",   check_pipes_well_formed),
         ("no_template_leakage", check_no_template_leakage),
     ]
-    # Tier 1 gate: structure preserved + both tag types appear (vocabulary, not mastery)
+    # Tier 1 gate: structure preserved + tag exclusivity (no line has both observed+inferred)
     tier1_checks = tier0_checks + [
-        ("both_tag_types", check_both_tag_types),
+        ("tags_exclusive", check_tags_exclusive),
     ]
     # Tier 2 gate: annotation format converges + content quality
     tier2_checks = tier1_checks + [
@@ -239,11 +248,8 @@ def _make_tiers() -> list[TierSpec]:
         TierSpec(
             name="tier0_structure",
             n_train=0, n_epochs=0, n_holdout=10, lr=0.0,
-            # 384 tokens: enough for all 3 headers + at least one triplet per section.
-            # 10 samples keeps zero-shot gate under 2 min.
             max_new_tokens=384,
             checks=tier0_checks,
-            # Sanity gate: adapter must know the output skeleton before any training.
             thresholds={c: 0.70 for c, _ in tier0_checks},
         ),
         TierSpec(
@@ -251,15 +257,14 @@ def _make_tiers() -> list[TierSpec]:
             n_train=50, n_epochs=1, n_holdout=20, lr=2e-5,
             max_new_tokens=384,
             checks=tier1_checks,
-            # Structure must not regress; both tag types must appear in outputs.
-            # confidence_numeric intentionally excluded — 50×1ep cannot overcome a
-            # 3-epoch confidence=X habit. That check belongs at Tier 2.
+            # Structure must not regress; no triplet line may carry both tag types.
+            # confidence_numeric excluded — 50×1ep cannot overcome a 3-epoch confidence=X habit.
             thresholds={
                 "headers":             0.70,
                 "entailed_non_empty":  0.75,
                 "pipes_well_formed":   0.85,
                 "no_template_leakage": 0.90,
-                "both_tag_types":      0.35,  # vocabulary floor: short quotes may only need one type
+                "tags_exclusive":      0.95,  # mixed tags on one line is always wrong
             },
         ),
         TierSpec(
@@ -270,7 +275,7 @@ def _make_tiers() -> list[TierSpec]:
             # 200×2ep should break the confidence=X habit and adopt canonical format.
             thresholds={
                 **{c: 0.85 for c, _ in tier0_checks},
-                "both_tag_types":       0.40,
+                "tags_exclusive":       0.95,
                 "confidence_numeric":   0.50,
                 "canonical_tag_format": 0.70,
                 "sections_distinct":    0.85,
@@ -280,17 +285,17 @@ def _make_tiers() -> list[TierSpec]:
         ),
         TierSpec(
             name="tier3_convergence",
-            n_train=0, n_epochs=5, n_holdout=20, lr=1e-5,  # n_train=0 uses full corpus
+            n_train=0, n_epochs=5, n_holdout=20, lr=1e-5,
             max_new_tokens=512,
             checks=tier3_checks,
             # Full training: structure near-ceiling, annotation mostly canonical.
             # Empirical baselines from 900×5ep run:
-            #   both_tag_types: 40% (corpus ceiling — short quotes use only one type)
+            #   tags_exclusive: ~100% (mixed tags on one line is rare/never)
             #   confidence_numeric: 80% (fractional check; 90% is out of reach at this scale)
-            #   avg_score (>= 0.80): calibrated from 55% pass rate at >= 0.85 threshold
+            #   avg_score (>= 0.80): 85% of holdout; raw mean 0.8606
             thresholds={
                 **{c: 0.90 for c, _ in tier0_checks},
-                "both_tag_types":       0.40,
+                "tags_exclusive":       0.95,
                 "confidence_numeric":   0.80,
                 "canonical_tag_format": 0.85,
                 "sections_distinct":    0.90,

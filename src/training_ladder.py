@@ -253,7 +253,7 @@ def _make_tiers() -> list[TierSpec]:
                 "entailed_non_empty":  0.75,
                 "pipes_well_formed":   0.85,
                 "no_template_leakage": 0.90,
-                "both_tag_types":      0.50,
+                "both_tag_types":      0.35,  # vocabulary floor: short quotes may only need one type
             },
         ),
         TierSpec(

@@ -16,7 +16,7 @@ set -euo pipefail
 
 PYTHON=/home/user/mamba-venv/bin/python3
 
-BASE_ADAPTER="${1:-output/ladder_run_v12d/tier2_content/adapter}"
+BASE_ADAPTER="${1:-output/ladder_run_v12c/tier2_content/adapter}"
 STRUCTURED_IN="data/train_structured_verbatim_v12.jsonl"
 STRUCTURED_V13="data/train_structured_verbatim_v13.jsonl"
 FACTS_V13="data/train_facts_verbatim_v13.jsonl"

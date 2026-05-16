@@ -279,7 +279,8 @@ def run_spo_training(config: SPOTrainingConfig) -> dict:
                     f"step {step}/{len(train_loader)} "
                     f"loss={metrics['loss']:.4f} "
                     f"avg_reward={metrics['avg_reward']:.4f} "
-                    f"avg_confidence={metrics['avg_confidence']:.4f}"
+                    f"avg_confidence={metrics['avg_confidence']:.4f}",
+                    flush=True,
                 )
 
     model.save_pretrained(output_dir / "adapter", save_embedding_layers=False)

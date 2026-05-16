@@ -281,31 +281,53 @@ def _generate_outputs(
 ) -> list[str]:
     """Load adapter once and generate outputs for all records.
 
+    Uses the same generation path as gen_spo_holdout.py: chat template,
+    no_repeat_ngram_size=6 (prevents degenerate repetition loops), and
+    strip_response_preamble to remove Qwen <think> scaffolding.
+
     Returns model output strings in the same order as records.
     """
     import torch
     from peft import AutoPeftModelForCausalLM  # type: ignore
     from transformers import AutoTokenizer  # type: ignore
+    from src.chat_format import build_generation_prompt, strip_response_preamble  # type: ignore
 
-    model = AutoPeftModelForCausalLM.from_pretrained(
-        str(adapter_path), torch_dtype=torch.float16, device_map="auto"
-    )
+    cfg_path = adapter_path / "adapter_config.json"
+    if cfg_path.exists():
+        import json as _json
+        cfg = _json.loads(cfg_path.read_text())
+        if "alora_invocation_tokens" in cfg:
+            del cfg["alora_invocation_tokens"]
+            cfg_path.write_text(_json.dumps(cfg, indent=2))
+
+    model = AutoPeftModelForCausalLM.from_pretrained(str(adapter_path), device_map="auto")
     tokenizer = AutoTokenizer.from_pretrained(str(adapter_path))
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
     model.eval()
+    if hasattr(model, "gradient_checkpointing_disable"):
+        model.gradient_checkpointing_disable()
+    model.config.use_cache = True
 
     outputs = []
     for rec in records:
-        prompt = rec["input_text"]
-        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+        chat_prompt = build_generation_prompt(tokenizer, rec["input_text"])
+        inputs = tokenizer(
+            chat_prompt, return_tensors="pt", add_special_tokens=False
+        ).to(model.device)
         with torch.no_grad():
             ids = model.generate(
                 **inputs,
                 max_new_tokens=max_new_tokens,
                 do_sample=False,
-                pad_token_id=tokenizer.eos_token_id,
+                pad_token_id=tokenizer.pad_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+                use_cache=True,
+                no_repeat_ngram_size=6,
             )
         gen = ids[0][inputs["input_ids"].shape[1]:]
-        outputs.append(tokenizer.decode(gen, skip_special_tokens=True))
+        raw = tokenizer.decode(gen, skip_special_tokens=True)
+        outputs.append(strip_response_preamble(raw))
 
     del model
     torch.cuda.empty_cache()

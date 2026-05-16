@@ -600,7 +600,7 @@ Result: permanent false-negative FAIL at Tier 1 on every run from the v8 adapter
 | 3 | 900 rec × 5 ep | Full convergence | — |
 
 Confidence annotation (numeric vs placeholder echo) requires **Tier 2+** to gate on.
-Tag vocabulary (`both_tag_types`) requires only **Tier 1** to confirm existence, not mastery.
+Tag exclusivity (`tags_exclusive`) is gate-able from **Tier 1**: a mixed-tag line is always a format error and should never occur, even in light training.
 
 ### 4. Make numeric checks fractional, not all-or-nothing
 
@@ -616,16 +616,22 @@ return valid_count / len(vals) >= 0.50
 This aligns with the scorer's partial-credit philosophy and avoids noise from
 one bad triplet in an otherwise converged output.
 
-### 5. Short quotes naturally use only one tag type
+### 5. "Both tag types present" is the wrong invariant
 
-**Problem:** `both_tag_types` gated at 0.75 at Tier 2. A quote like "So many books,
-so little time" only produces 1-2 triplets — there may be no natural place to use
-both `observed` and `inferred`. The model isn't wrong; the input constrains it.
+**Problem:** `both_tag_types` checked whether `observed` AND `inferred` each appeared
+anywhere in the full output. A short quote like "So many books, so little time" only
+produces 1-2 triplets — there may be no natural place to use `inferred`. The model
+isn't wrong; the input constrains it. The old check penalized correct short-quote outputs.
+Additionally, the corpus ceiling was ~40-43% across all training scales, so any threshold
+above 0.43 would always fail.
 
-**Rule:** `both_tag_types` is a vocabulary existence check (does the model know both
-words?), not a mastery check. Floor at Tier 1: 0.35. Floor at Tier 2/3: 0.40.
-The corpus ceiling is ~40-43% across all training scales — setting any higher gate
-will always fail on this short-quote corpus.
+**Rule:** The correct invariant is **tag exclusivity**: no single triplet line may carry
+both `observed` and `inferred` simultaneously. A line with `(observed, inferred, confidence=0.9)`
+is a format error. A output where every line uses exactly one tag (even all-observed) is correct.
+
+New check: `check_tags_exclusive` scans every pipe-containing line and returns `False`
+if any line contains both words. Threshold 0.95 at all tiers — mixed tags on one line is
+always wrong regardless of training scale.
 
 ### Empirical baselines (v8 adapter → v9 corpus)
 
@@ -635,7 +641,7 @@ will always fail on this short-quote corpus.
 | entailed_non_empty | 100% | 80% | 93% | 95% |
 | pipes_well_formed | 100% | 95% | 100% | 100% |
 | no_template_leakage | 100% | 95% | 100% | 100% |
-| both_tag_types | — | 40% | 43% | 40% |
+| tags_exclusive | — | ~100% | ~100% | ~100% |
 | confidence_numeric | — | — | 73% | 80% |
 | canonical_tag_format | — | — | 87% | 85% |
 | sections_distinct | — | — | 100% | 100% |

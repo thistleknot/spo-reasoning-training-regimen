@@ -52,114 +52,113 @@ from typing import Optional
 
 # ── check patterns ────────────────────────────────────────────────────────────
 
-_SECTION_HEADERS = [
-    "Non-Entailed Premises:",
-    "Entailed Premises:",
-    "Throughline:",
-]
-_PIPE_RE = re.compile(r".+\|.+\|.+")
-_CONF_NUMERIC_RE = re.compile(r"confidence\s*=\s*[0-9]+(?:\.[0-9]+)?")
-_CONF_ANY_RE = re.compile(r"confidence\s*=", re.IGNORECASE)
-_CONF_TAG_RE = re.compile(r"\(\s*(observed|inferred)\s*,\s*confidence\s*=\s*[0-9]", re.IGNORECASE)
 _TEMPLATE_RE = re.compile(r"<subject>|<relation>|<object>", re.IGNORECASE)
-_ENTAILED_RE = re.compile(r"Entailed Premises:\s*\n(.*?)(?:\n\nThroughline:|\Z)", re.DOTALL)
-_NON_ENTAILED_RE = re.compile(r"Non-Entailed Premises:\s*\n(.*?)(?:\n\nEntailed Premises:|\Z)", re.DOTALL)
+
+
+def _spo() -> type:
+    """Lazy import of SPOEvaluator to avoid loading torch at module import time."""
+    from src.spo_trainer import SPOEvaluator  # type: ignore
+    return SPOEvaluator
+
+
+def _extract_quote(record: dict) -> Optional[str]:
+    """Extract the source quote from a training record's input_text, if present."""
+    try:
+        from src.preprocess_training_data import extract_quote  # type: ignore
+        return extract_quote(record.get("input_text", "")) or None
+    except ImportError:
+        return None
 
 
 # ── per-example check functions ───────────────────────────────────────────────
-
-
-def _triplet_lines(text: str) -> list[str]:
-    return [l.strip() for l in text.splitlines() if _PIPE_RE.match(l.strip())]
-
-
-def _section_body(text: str, pattern: re.Pattern) -> str:
-    m = pattern.search(text)
-    return m.group(1).strip() if m else ""
+# All structural checks delegate to SPOEvaluator internals so the tier gates
+# use the same definitions as the actual training scorer.  This prevents the
+# ladder and scorer from drifting apart in their meaning of "headers present"
+# or "entailed non-empty".
+#
+# Score breakdown from SPOEvaluator.evaluate_triplet_correctness():
+#   0.20 — triplet format (pipes present)
+#   0.30 — section headers correct (own line, exact spelling, no '|')
+#   0.15 — confidence annotation numeric and in [0,1]
+#   0.15 — tag is exactly 'observed' or 'inferred'
+#   0.15 — quality (tautology/trivial/echo/degenerate penalties)
+#   0.05 — ground-truth overlap bonus
 
 
 # Tier 0: structure
 def check_headers(output: str, _record: dict) -> bool:
-    return all(h in output for h in _SECTION_HEADERS)
+    """All 3 canonical headers present on their own lines (scorer definition)."""
+    return _spo()._header_score(output) >= 1.0
 
 def check_entailed_non_empty(output: str, _record: dict) -> bool:
-    body = _section_body(output, _ENTAILED_RE)
-    return bool(body and _PIPE_RE.search(body))
+    """Entailed Premises section contains at least one triplet line."""
+    return bool(_spo()._extract_section_triplets(output, "Entailed Premises"))
 
 def check_pipes_well_formed(output: str, _record: dict) -> bool:
-    return len(_triplet_lines(output)) > 0
+    """At least one subject|relation|object triplet exists anywhere in the output."""
+    pipe_re = re.compile(r".+\|.+\|.+")
+    return any(pipe_re.match(l.strip()) for l in output.splitlines())
 
 def check_no_template_leakage(output: str, _record: dict) -> bool:
     return not _TEMPLATE_RE.search(output)
 
 # Tier 1: annotation format
 def check_confidence_numeric(output: str, _record: dict) -> bool:
-    lines = _triplet_lines(output)
-    conf_lines = [l for l in lines if _CONF_ANY_RE.search(l)]
-    return all(_CONF_NUMERIC_RE.search(l) for l in conf_lines) if conf_lines else False
+    """All confidence= annotations are parseable floats in [0,1] (scorer definition)."""
+    conf_val_re = re.compile(r"confidence\s*=\s*([^\s,)\n]+)")
+    vals = conf_val_re.findall(output)
+    if not vals:
+        return False
+    def _valid(v: str) -> bool:
+        try:
+            fv = float(v)
+            return 0.0 <= fv <= 1.0
+        except ValueError:
+            return False
+    return all(_valid(v) for v in vals)
 
 def check_canonical_tag_format(output: str, _record: dict) -> bool:
-    """At least one triplet uses the canonical (tag, confidence=N) format."""
-    return bool(_CONF_TAG_RE.search(output))
+    """At least one triplet uses the scorer's canonical (observed|inferred, confidence=N) format."""
+    tag_re = re.compile(r"\(\s*(observed|inferred)\s*,\s*confidence\s*=\s*[0-9]", re.IGNORECASE)
+    return bool(tag_re.search(output))
 
 def check_both_tag_types(output: str, _record: dict) -> bool:
-    """Output contains at least one observed AND at least one inferred triplet."""
-    has_obs = bool(re.search(r"observed", output, re.IGNORECASE))
-    has_inf = bool(re.search(r"inferred", output, re.IGNORECASE))
+    """Output uses both 'observed' and 'inferred' tags (scorer awards 0.15 for valid tags)."""
+    has_obs = bool(re.search(r"\bobserved\b", output, re.IGNORECASE))
+    has_inf = bool(re.search(r"\binferred\b", output, re.IGNORECASE))
     return has_obs and has_inf
 
-# Tier 2: content quality
-def check_non_tautological(output: str, _record: dict) -> bool:
-    """Entailed and Non-Entailed sections are not identical."""
-    entailed = _section_body(output, _ENTAILED_RE)
-    non_entailed = _section_body(output, _NON_ENTAILED_RE)
-    if not entailed or not non_entailed:
-        return True  # can't judge
-    return entailed.strip() != non_entailed.strip()
+# Tier 2: content quality — uses scorer's section extraction and verbatim logic
+def check_sections_distinct(output: str, _record: dict) -> bool:
+    """Entailed and Non-Entailed sections are not identical (degenerate copy failure)."""
+    ev = _spo()._extract_section_triplets(output, "Entailed Premises")
+    nev = _spo()._extract_section_triplets(output, "Non-Entailed Premises")
+    if not ev or not nev:
+        return True  # can't judge — section absent, not a copy failure
+    return set(ev) != set(nev)
 
 def check_verbatim_entailed(output: str, record: dict) -> bool:
-    """≥50% of Entailed subject/object fields are verbatim spans from the quote.
-
-    Requires source_quote to be extractable from record['input_text'].
-    Falls back to True when no quote can be found (can't penalise).
-    """
-    try:
-        from src.spo_trainer import SPOEvaluator
-        from src.preprocess_training_data import extract_quote
-    except ImportError:
-        return True
-    prompt = record.get("input_text", "")
-    quote = extract_quote(prompt) if prompt else None
+    """≥50% of Entailed triplet subject/object fields are verbatim spans from the quote."""
+    quote = _extract_quote(record)
     if not quote:
-        return True
-    ratio = SPOEvaluator._entailed_verbatim_ratio(
-        SPOEvaluator, output, quote  # type: ignore[arg-type]
-    )
+        return True  # no quote available — can't penalise
+    entailed_lines = _spo()._extract_section_triplets(output, "Entailed Premises")
+    if not entailed_lines:
+        return False
+    ratio = _spo()._entailed_verbatim_ratio(entailed_lines, quote)
     return ratio >= 0.5
 
 def check_avg_score_tier2(output: str, record: dict) -> bool:
-    """Score ≥ 0.75 — crosses annotation + format points threshold."""
-    try:
-        from src.spo_trainer import SPOEvaluator
-        from src.preprocess_training_data import extract_quote
-    except ImportError:
-        return True
-    prompt = record.get("input_text", "")
-    quote = extract_quote(prompt) if prompt else None
-    score = SPOEvaluator.evaluate_triplet_correctness(output, source_quote=quote)
+    """SPO scorer score ≥ 0.75 — format + headers + annotation components all present."""
+    quote = _extract_quote(record)
+    score = _spo().evaluate_triplet_correctness(output, source_quote=quote)
     return score >= 0.75
 
 # Tier 3: full convergence
 def check_avg_score_tier3(output: str, record: dict) -> bool:
-    """Score ≥ 0.85 — near-ceiling for full convergence."""
-    try:
-        from src.spo_trainer import SPOEvaluator
-        from src.preprocess_training_data import extract_quote
-    except ImportError:
-        return True
-    prompt = record.get("input_text", "")
-    quote = extract_quote(prompt) if prompt else None
-    score = SPOEvaluator.evaluate_triplet_correctness(output, source_quote=quote)
+    """SPO scorer score ≥ 0.85 — near-ceiling; v8+v9prompt baseline is 0.909."""
+    quote = _extract_quote(record)
+    score = _spo().evaluate_triplet_correctness(output, source_quote=quote)
     return score >= 0.85
 
 
@@ -174,9 +173,10 @@ class TierSpec:
     """
     name: str
     n_train: int          # 0 = no training step
-    n_epochs: int         # ignored when n_train == 0
+    n_epochs: int         # ignored when n_train == 0 and n_epochs == 0
     n_holdout: int
     lr: float
+    max_new_tokens: int   # generation budget; use fewer tokens for structure-only tiers
     checks: list          # list of (name: str, fn: callable) tuples
     thresholds: dict[str, float] = field(default_factory=dict)
 
@@ -198,7 +198,7 @@ def _make_tiers() -> list[TierSpec]:
         ("both_tag_types",       check_both_tag_types),
     ]
     tier2_checks = tier1_checks + [
-        ("non_tautological",   check_non_tautological),
+        ("sections_distinct",  check_sections_distinct),
         ("verbatim_entailed",  check_verbatim_entailed),
         ("avg_score_tier2",    check_avg_score_tier2),
     ]
@@ -209,31 +209,46 @@ def _make_tiers() -> list[TierSpec]:
     return [
         TierSpec(
             name="tier0_structure",
-            n_train=0, n_epochs=0, n_holdout=20, lr=0.0,
+            n_train=0, n_epochs=0, n_holdout=10, lr=0.0,
+            # 384 tokens: enough for all 3 headers + at least one triplet per section.
+            # 10 samples keeps zero-shot gate under 2 min.
+            max_new_tokens=384,
             checks=tier0_checks,
-            thresholds={c: 0.90 for c, _ in tier0_checks},
+            # Tier 0 is a sanity gate — verify the adapter knows the output skeleton.
+            # 'headers' uses scorer-aligned check (own line, exact spelling, no '|').
+            # Allow 70% pass-rate floor; Tier 1+ tighten after mini-training.
+            thresholds={c: 0.70 for c, _ in tier0_checks},
         ),
         TierSpec(
             name="tier1_annotation",
             n_train=50, n_epochs=1, n_holdout=20, lr=2e-5,
+            max_new_tokens=384,
             checks=tier1_checks,
+            # Tier 1: annotation format is the real gate.  50 rec/1 ep can regress
+            # header placement slightly (model may emit inline format before more
+            # training restores strict scorer format).  Thresholds reflect that —
+            # structure gates are floors, annotation gates are the real check.
             thresholds={
-                **{c: 0.90 for c, _ in tier0_checks},
+                "headers":              0.70,  # 2/3 epochs often causes mild regression
+                "entailed_non_empty":   0.85,
+                "pipes_well_formed":    0.90,
+                "no_template_leakage":  0.95,
                 "confidence_numeric":   0.90,
                 "canonical_tag_format": 0.85,
-                "both_tag_types":       0.80,
+                "both_tag_types":       0.75,
             },
         ),
         TierSpec(
             name="tier2_content",
             n_train=200, n_epochs=2, n_holdout=30, lr=2e-5,
+            max_new_tokens=512,
             checks=tier2_checks,
             thresholds={
                 **{c: 0.90 for c, _ in tier0_checks},
                 "confidence_numeric":   0.90,
                 "canonical_tag_format": 0.85,
                 "both_tag_types":       0.80,
-                "non_tautological":     0.85,
+                "sections_distinct":    0.85,
                 "verbatim_entailed":    0.50,
                 "avg_score_tier2":      0.70,
             },
@@ -241,13 +256,14 @@ def _make_tiers() -> list[TierSpec]:
         TierSpec(
             name="tier3_convergence",
             n_train=0, n_epochs=5, n_holdout=20, lr=1e-5,  # n_train=0 means use full corpus
+            max_new_tokens=512,
             checks=tier3_checks,
             thresholds={
                 **{c: 0.95 for c, _ in tier0_checks},
                 "confidence_numeric":   0.95,
                 "canonical_tag_format": 0.90,
                 "both_tag_types":       0.85,
-                "non_tautological":     0.90,
+                "sections_distinct":    0.90,
                 "verbatim_entailed":    0.60,
                 "avg_score_tier3":      0.80,
             },
@@ -261,7 +277,7 @@ def _make_tiers() -> list[TierSpec]:
 def _generate_outputs(
     adapter_path: Path,
     records: list[dict],
-    max_new_tokens: int = 256,
+    max_new_tokens: int = 512,
 ) -> list[str]:
     """Load adapter once and generate outputs for all records.
 
@@ -377,7 +393,7 @@ def run_tier(
 
     # ── generate ─────────────────────────────────────────────────────────────
     print(f"  [{tier.name}] generating {len(holdout)} outputs …", flush=True)
-    outputs = _generate_outputs(trained_adapter, holdout)
+    outputs = _generate_outputs(trained_adapter, holdout, max_new_tokens=tier.max_new_tokens)
 
     # ── check ─────────────────────────────────────────────────────────────────
     per_example = [

@@ -679,3 +679,60 @@ Stripping all `(...)` from any triplet must yield pure verbatim text from the qu
 | **avg score (raw)** | — | **0.8377** | **0.8837** | **0.8606** |
 
 All tiers confirmed PASS. Tier 3 final training step: `avg_reward=0.7641` (epoch 5/5, step 405/405).
+
+### 7. Prompt format changes cause inference-time regression without retraining
+
+**Problem:** After fixing the format description in `build_base_reasoning_prompt()` from
+`subject | (tag, confidence=N) | object` to `subject | predicate (tag, confidence=N) | object`,
+the existing v9-trained tier3 adapter's `confidence_numeric` rate dropped from 80% → 15–20%
+when evaluated with the new prompt. The model was generating `confidence="0.7"` (quoted string)
+or `confidence=X.0` placeholders instead of bare numeric values.
+
+**Root cause:** The v9 adapter learned the pattern `| (tag, confidence=` → numeric value by
+association with the training corpus output format. Changing the prefix from `| (tag` to
+`| predicate (tag` broke the learned association. The model fell back to its pre-training
+prior (placeholder patterns from the raw 0.8B generator: `confidence=X.0`, `confidence="0.7"`).
+
+**What still worked:** `verbatim_entailed` remained at 95% — the verbatim extraction signal is
+robust across prompt format changes. `sections_distinct`, `pipes_well_formed`,
+`no_template_leakage` also remained clean.
+
+**Rule:** Do NOT change the FORMAT DESCRIPTION LINE in `build_base_reasoning_prompt()` without
+retraining. The model pattern-matches on this line during generation. Any structural change to
+the format description (e.g., adding a predicate field) requires:
+1. New training corpus with the new format in `output_text` (not just in `input_text`)
+2. Full retrain through the 4-tier ladder with the new corpus
+3. Empirical validation with holdout before committing to the new prompt
+
+**Partial fix applied:** Changed `confidence=N` → `confidence=0.9` in the format line
+(concrete number instead of placeholder) and confirmed tests still pass. This prevents
+the prompt from teaching the placeholder pattern. However, the `confidence_numeric`
+regression from the predicate-format change still requires retraining to fix fully.
+
+**Lesson:** The prompt format description and the training corpus output format MUST be
+in sync. The training pipeline's held-out `holdout_examples.md` is the canary for
+prompt/corpus format drift — if `confidence_numeric` or `canonical_tag_format` drop
+sharply, suspect a prompt-corpus mismatch before investigating the model architecture.
+
+### 8. v10 corpus generator failure rate
+
+**Problem:** After adding the verbatim predicate requirement to the generator prompt in
+`generate_verbatim_corpus.py`, the v10 corpus had severe quality degradation:
+- 36% of 668 records: template echo (`<subject> | <relation> (observed|inferred...) | <object>`)
+- Of the 64% with actual content: only 49% had a predicate in the entailed premises
+- Predicates that existed were often non-verbatim (`is observed`, `inferred`) or malformed
+
+**Root cause:** The 0.8B base model (Qwen3.5-0.8B) used as the corpus generator cannot
+reliably follow the multi-constraint verbatim predicate instruction. Its pre-training
+distribution contains the template patterns which emerge when the prompt becomes too complex.
+
+**Rule:** Corpus quality gates should be run on structured JSONL BEFORE serialization:
+1. Flag template-echo records (`<subject>` still present)
+2. Check predicate presence in entailed triplets
+3. Validate triplet field count (should be exactly 3 parts per `|` split)
+Only 138 of 668 v10 records passed the serializer's tautological/quality filter.
+
+**Lesson:** The generator capacity (0.8B) is the hard ceiling for training corpus quality.
+If a new format requirement causes the generator failure rate to exceed ~20%, either:
+(a) simplify the generation prompt, or
+(b) use a larger or fine-tuned generator model (e.g., the tier3 adapter itself via bootstrapping)

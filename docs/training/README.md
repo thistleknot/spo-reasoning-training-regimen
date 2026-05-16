@@ -635,21 +635,21 @@ if any line contains both words. Thresholds are calibrated per tier from empiric
 - **Tier 2** (200×2ep): 87% — mid-training instability produces transient `(inferred|observed,...)` patterns → threshold 0.85
 - **Tier 3** (900×5ep): 95% (n=20, wide CI) → threshold 0.90 for safety
 
-### Empirical baselines (v8 adapter → v9 corpus)
+### Empirical baselines (all tiers, v9 corpus — confirmed with holdout inference)
 
 | Check | Tier 0 (zero-shot) | Tier 1 (50×1ep) | Tier 2 (200×2ep) | Tier 3 (900×5ep) |
 |-------|--------------------|-----------------|------------------|------------------|
-| headers | 100% | 100% | 90% | 90% |
-| entailed_non_empty | 100% | 80% | 93% | 95% |
-| pipes_well_formed | 100% | 95% | 100% | 100% |
-| no_template_leakage | 100% | 95% | 100% | 100% |
+| headers | 100% | 90% | 97% | 90% |
+| entailed_non_empty | 100% | 100% | 93% | 95% |
+| pipes_well_formed | 100% | 100% | 100% | 100% |
+| no_template_leakage | 100% | 100% | 100% | 100% |
 | tags_exclusive | — | 100% | 87% | 95% |
-| confidence_numeric | — | — | 73% | 80% |
-| canonical_tag_format | — | — | 87% | 85% |
+| confidence_numeric | — | — | 80% | 80% |
+| canonical_tag_format | — | — | 90% | 85% |
 | sections_distinct | — | — | 100% | 100% |
-| verbatim_entailed | — | — | 83% | 85% |
-| avg_score (≥0.80) | — | — | — | 85% |
-| **avg score (raw)** | — | — | **0.87** | **0.8606** |
+| verbatim_entailed | — | — | 87% | 85% |
+| avg_score_tier2 (≥0.75) | — | — | 87% | — |
+| avg_score_tier3 (≥0.80) | — | — | — | 85% |
+| **avg score (raw)** | — | **0.8377** | **0.8837** | **0.8606** |
 
-Tier 3 final training step: `avg_reward=0.7641` (epoch 5/5, step 405/405).
-85% of holdout samples score ≥ 0.80; raw mean 0.8606.
+All tiers confirmed PASS. Tier 3 final training step: `avg_reward=0.7641` (epoch 5/5, step 405/405).

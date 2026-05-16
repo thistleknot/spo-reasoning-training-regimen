@@ -68,6 +68,7 @@ _SYSTEM = (
 
 # Matches a valid S|P(tag,conf)|O triplet line (with or without surrounding parens)
 _TRIPLET_RE = re.compile(r"[^|]+\|[^|]+\|[^|]+")
+_TAG_CONF_RE = re.compile(r'\(\s*(observed|inferred)\s*,\s*confidence\s*=\s*[0-9]', re.IGNORECASE)
 
 
 def build_translit_prompt(verbatim_triplet: str) -> str:
@@ -78,16 +79,28 @@ def build_translit_prompt(verbatim_triplet: str) -> str:
 def _clean_translit_output(raw: str) -> Optional[str]:
     """Extract and validate the transliteration triplet from model output.
 
-    Strips <think> blocks, takes the first line that looks like a triplet.
-    Returns None when no valid triplet can be found.
+    Strips <think> blocks, takes the first line that looks like a valid triplet
+    with a (tag, confidence=N.N) annotation in the predicate field.
+    Returns None when no valid triplet can be found or the format is wrong.
+
+    Failure modes:
+        Returns None if no line has exactly 3 pipe-separated fields AND a
+        canonical (observed|inferred, confidence=N.N) annotation.  Garbage
+        transliterations (no confidence, mangled text) are rejected so they
+        do not poison training targets.
     """
     text = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
     for line in text.splitlines():
         line = line.strip().strip("()")
-        if _TRIPLET_RE.search(line) and "|" in line:
-            parts = [p.strip() for p in line.split("|")]
-            if len(parts) == 3 and all(parts):
-                return f"({' | '.join(parts)})"
+        if not (_TRIPLET_RE.search(line) and "|" in line):
+            continue
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) != 3 or not all(parts):
+            continue
+        # Require (tag, confidence=N.N) in the predicate field
+        if not _TAG_CONF_RE.search(parts[1]):
+            continue
+        return f"({' | '.join(parts)})"
     return None
 
 

@@ -802,3 +802,39 @@ class TestBootstrapPredicates(unittest.TestCase):
         self.assertIsNotNone(_TRIPLET_LINE_RE.match("S | verb (observed, confidence=1.0) | O"))
         self.assertIsNone(_TRIPLET_LINE_RE.match("S | P | confidence=0.0 | O"))
         self.assertIsNone(_TRIPLET_LINE_RE.match("S | (inferred) | C | D | E"))
+
+
+class TestIsBadRecord(unittest.TestCase):
+    """Tests for is_bad_record empty-entailed guard."""
+
+    def setUp(self):
+        from src.serialize_training_format import is_bad_record
+        self.is_bad = is_bad_record
+
+    def _good(self, **overrides):
+        base = {
+            "entailed_premises": ["S | is (observed, confidence=1.0) | O"],
+            "non_entailed_premises": ["S2 | has (inferred, confidence=0.7) | O2"],
+            "syllogism": "Therefore, X.",
+        }
+        base.update(overrides)
+        return base
+
+    def test_empty_entailed_is_bad(self):
+        self.assertTrue(self.is_bad(self._good(entailed_premises=[])))
+
+    def test_none_entailed_is_bad(self):
+        self.assertTrue(self.is_bad(self._good(entailed_premises=None)))
+
+    def test_missing_entailed_key_is_bad(self):
+        rec = {"non_entailed_premises": ["X | is | Y"], "syllogism": "Therefore, X."}
+        self.assertTrue(self.is_bad(rec))
+
+    def test_good_record_passes(self):
+        self.assertFalse(self.is_bad(self._good()))
+
+    def test_na_syllogism_is_bad(self):
+        self.assertTrue(self.is_bad(self._good(syllogism="N/A")))
+
+    def test_empty_syllogism_is_bad(self):
+        self.assertTrue(self.is_bad(self._good(syllogism="")))

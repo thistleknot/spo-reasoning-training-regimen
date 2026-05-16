@@ -289,6 +289,7 @@ def is_bad_record(record: dict) -> bool:
     """Return True when a record should be excluded from training.
 
     Filters:
+    - Empty entailed_premises (model would learn to output N/A conclusions)
     - Template placeholders in any triplet (model would learn to echo `<subject>` etc.)
     - Missing or N/A-only throughline (trains the model to output N/A conclusions)
     - Repetitive triplets: any single triplet repeated 3+ times (degenerate data)
@@ -296,7 +297,11 @@ def is_bad_record(record: dict) -> bool:
     Require: record follows {entailed_premises, non_entailed_premises, syllogism} schema.
     Guarantee: returns bool; never raises.
     """
-    all_trips = (record.get("entailed_premises") or []) + (record.get("non_entailed_premises") or [])
+    entailed = record.get("entailed_premises") or []
+    if not entailed:
+        return True
+
+    all_trips = list(entailed) + (record.get("non_entailed_premises") or [])
 
     if any(_TEMPLATE_RE.search(t) for t in all_trips):
         return True

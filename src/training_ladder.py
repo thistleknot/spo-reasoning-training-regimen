@@ -395,12 +395,105 @@ def _run_train(
 
 
 @dataclass
+class HoldoutSample:
+    prompt: str
+    expected: str
+    generated: str
+    score: float
+
+
+@dataclass
 class TierResult:
     tier: str
     n_outputs: int
     rates: dict[str, float]
     passed: bool
     failures: list[str]
+    samples: list[HoldoutSample] = field(default_factory=list)
+
+
+def _code_block(text: str) -> str:
+    return f"```text\n{text.strip()}\n```"
+
+
+def _write_tier_holdout_markdown(result: TierResult, path: Path) -> None:
+    """Write prompt/expected/generated/score for every holdout sample in one tier."""
+    avg_score = sum(s.score for s in result.samples) / len(result.samples) if result.samples else 0.0
+    failure_checks = {f.split(":")[0] for f in result.failures}
+    lines = [
+        f"# Holdout examples — {result.tier}",
+        "",
+        f"**Pass:** {'✓' if result.passed else '✗'}  |  "
+        f"**Avg score:** {avg_score:.4f}  |  "
+        f"**N:** {result.n_outputs}",
+        "",
+        "## Check rates",
+        "",
+        "| Check | Rate | Status |",
+        "|---|---:|:---:|",
+    ]
+    for check_name, rate in result.rates.items():
+        status = "✗" if check_name in failure_checks else "✓"
+        lines.append(f"| {check_name} | {rate:.0%} | {status} |")
+    for i, s in enumerate(result.samples, start=1):
+        lines.extend([
+            "",
+            f"## Example {i}  (score: {s.score:.4f})",
+            "",
+            "**Prompt**",
+            "",
+            _code_block(s.prompt),
+            "",
+            "**Expected**",
+            "",
+            _code_block(s.expected),
+            "",
+            "**Generated**",
+            "",
+            _code_block(s.generated),
+        ])
+    path.write_text("\n".join(lines) + "\n")
+
+
+def _write_combined_holdout_markdown(tier_results: list[TierResult], path: Path) -> None:
+    """Write a cross-tier summary with avg score progression and all per-tier examples."""
+    lines = [
+        "# Training Ladder — Holdout Examples",
+        "",
+        "## Score progression by tier",
+        "",
+        "| Tier | Avg score | Pass |",
+        "|---|---:|:---:|",
+    ]
+    for r in tier_results:
+        avg = sum(s.score for s in r.samples) / len(r.samples) if r.samples else 0.0
+        lines.append(f"| {r.tier} | {avg:.4f} | {'✓' if r.passed else '✗'} |")
+    for r in tier_results:
+        avg = sum(s.score for s in r.samples) / len(r.samples) if r.samples else 0.0
+        lines.extend([
+            "",
+            f"---",
+            "",
+            f"# {r.tier}  (avg score: {avg:.4f})",
+        ])
+        for i, s in enumerate(r.samples, start=1):
+            lines.extend([
+                "",
+                f"## {r.tier} — Example {i}  (score: {s.score:.4f})",
+                "",
+                "**Prompt**",
+                "",
+                _code_block(s.prompt),
+                "",
+                "**Expected**",
+                "",
+                _code_block(s.expected),
+                "",
+                "**Generated**",
+                "",
+                _code_block(s.generated),
+            ])
+    path.write_text("\n".join(lines) + "\n")
 
 
 def run_tier(
@@ -458,13 +551,32 @@ def run_tier(
     ]
     passed = len(failures) == 0
 
-    return TierResult(
+    # ── score + collect samples ───────────────────────────────────────────────
+    spo = _spo()
+    samples = [
+        HoldoutSample(
+            prompt=rec.get("input_text", ""),
+            expected=rec.get("output_text", ""),
+            generated=out,
+            score=spo.evaluate_triplet_correctness(out, source_quote=_extract_quote(rec)),
+        )
+        for out, rec in zip(outputs, holdout)
+    ]
+
+    result = TierResult(
         tier=tier.name,
         n_outputs=len(outputs),
         rates=rates,
         passed=passed,
         failures=failures,
-    ), trained_adapter
+        samples=samples,
+    )
+
+    # Write per-tier holdout markdown
+    tier_output_dir.mkdir(parents=True, exist_ok=True)
+    _write_tier_holdout_markdown(result, tier_output_dir / "holdout_examples.md")
+
+    return result, trained_adapter
 
 
 # ── ladder orchestrator ───────────────────────────────────────────────────────
@@ -554,11 +666,13 @@ class TrainingLadder:
             "passed": passed,
             "stopped_at": stopped_at,
             "tiers": [
-                {"tier": r.tier, "passed": r.passed, "rates": r.rates, "failures": r.failures}
+                {"tier": r.tier, "passed": r.passed, "rates": r.rates, "failures": r.failures,
+                 "avg_score": sum(s.score for s in r.samples) / len(r.samples) if r.samples else None}
                 for r in tier_results
             ],
         }
         (self.output_root / "ladder_summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+        _write_combined_holdout_markdown(tier_results, self.output_root / "holdout_examples.md")
 
         return LadderResult(
             tiers_run=tier_results,

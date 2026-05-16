@@ -188,12 +188,11 @@ def build_base_reasoning_prompt(quote: str) -> str:
             "VERBATIM EXTRACTION RULE (Entailed Premises only):",
             "- Subject, predicate, and object MUST be exact, verbatim text copied from the quote above.",
             "- Do NOT paraphrase, summarize, or invent language for Entailed fields.",
-            "- Parenthetical clarifications may be added AFTER verbatim text: verbatim text (clarification)",
-            "- Invariant: strip all (...) from a triplet and the remaining text must be verbatim from the quote.",
-            '  Example: "Don\'t be | satisfied with (inferred, confidence=0.7) | stories"',
-            '  Example: "unexamined life (a life without self-reflection) | lacks (observed, confidence=1.0) | worth"',
-            "- Non-Entailed Premises and the Throughline may use your own words.",
-            "",
+            "- After each verbatim triplet, add a transliteration on the NEXT LINE in parentheses,",
+            "  using the same S | P (tag, confidence=N.N) | O format but with plain-English paraphrase:",
+            '  verbatim:        The unexamined life | is not worth (observed, confidence=1.0) | living',
+            '  transliteration: (A life without self-reflection | has no (inferred, confidence=0.9) | value)',
+            "- Transliteration tags/confidence follow the same rules as main premises.",
             "IMPORTANT: The Entailed Premises section MUST contain at least one triplet.",
             "Never leave Entailed Premises empty.",
             "",
@@ -241,19 +240,57 @@ def triplets_to_text(
     return "\n".join(lines) if lines else "N/A"
 
 
+def _entailed_with_transliterations(
+    entailed: list[str] | None,
+    transliterations: list[str] | None,
+) -> str:
+    """Interleave each verbatim entailed triplet with its transliteration line.
+
+    Preconditions:
+        entailed and transliterations are parallel lists (or transliterations
+        may be shorter / None).  Each transliteration is a plain-English triplet
+        in the same S|P(tag,conf)|O format, wrapped in parentheses.
+    Guarantee:
+        Returns a string with each verbatim triplet followed by its
+        transliteration on the next line, or just the verbatim line when no
+        transliteration is available.
+    Failure modes:
+        Returns 'N/A' when entailed is empty or None.
+    """
+    normalized = [t for t in (normalize_triplet(e) for e in (entailed or [])) if t]
+    if not normalized:
+        return "N/A"
+    translit = list(transliterations or [])
+    lines: list[str] = []
+    for i, triplet in enumerate(normalized):
+        lines.append(triplet)
+        tl = translit[i] if i < len(translit) else None
+        if tl:
+            tl = tl.strip()
+            # Ensure transliteration is wrapped in parens
+            if not tl.startswith("("):
+                tl = f"({tl})"
+            if not tl.endswith(")"):
+                tl = f"{tl})"
+            lines.append(tl)
+    return "\n".join(lines)
+
+
 def serialize_training_record(structured_record: dict) -> dict:
     """Convert structured record to input_text/output_text format for training.
 
     Training format uses pedagogical ordering:
     - Non-Entailed Premises FIRST (teaches negative inference)
-    - Entailed Premises second (teaches positive inference)
+    - Entailed Premises second, each followed by a transliteration line (teaches verbatim + paraphrase)
     - Throughline last (the conclusion)
 
-    Triplets are normalized to canonical (tag, confidence=X) annotation format
-    so the model learns scorer-compatible output.
+    When the record carries an `entailed_transliterations` list, each verbatim
+    entailed triplet is followed by a parenthetical transliteration triplet in
+    the same S|P(tag,conf)|O format.
 
     Args:
-        structured_record: {quote, entailed_premises, non_entailed_premises, syllogism}
+        structured_record: {quote, entailed_premises, non_entailed_premises,
+                             syllogism, [entailed_transliterations]}
 
     Returns:
         {input_text, output_text} for trainer
@@ -262,15 +299,22 @@ def serialize_training_record(structured_record: dict) -> dict:
     non_entailed = structured_record.get("non_entailed_premises")
     entailed = structured_record.get("entailed_premises")
     throughline = structured_record.get("syllogism")
+    transliterations = structured_record.get("entailed_transliterations")
 
     input_text = build_base_reasoning_prompt(quote)
+
+    entailed_block = (
+        _entailed_with_transliterations(entailed, transliterations)
+        if transliterations
+        else triplets_to_text(entailed)
+    )
 
     output_lines = [
         "Non-Entailed Premises:",
         triplets_to_text(non_entailed),
         "",
         "Entailed Premises:",
-        triplets_to_text(entailed),
+        entailed_block,
         "",
         "Throughline:",
         throughline.strip() if throughline and throughline.strip() else "N/A",

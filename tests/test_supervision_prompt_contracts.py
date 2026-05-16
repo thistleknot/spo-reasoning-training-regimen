@@ -53,12 +53,11 @@ class SupervisionPromptContractTests(unittest.TestCase):
                     "VERBATIM EXTRACTION RULE (Entailed Premises only):",
                     "- Subject, predicate, and object MUST be exact, verbatim text copied from the quote above.",
                     "- Do NOT paraphrase, summarize, or invent language for Entailed fields.",
-                    "- Parenthetical clarifications may be added AFTER verbatim text: verbatim text (clarification)",
-                    "- Invariant: strip all (...) from a triplet and the remaining text must be verbatim from the quote.",
-                    '  Example: "Don\'t be | satisfied with (inferred, confidence=0.7) | stories"',
-                    '  Example: "unexamined life (a life without self-reflection) | lacks (observed, confidence=1.0) | worth"',
-                    "- Non-Entailed Premises and the Throughline may use your own words.",
-                    "",
+                    "- After each verbatim triplet, add a transliteration on the NEXT LINE in parentheses,",
+                    "  using the same S | P (tag, confidence=N.N) | O format but with plain-English paraphrase:",
+                    '  verbatim:        The unexamined life | is not worth (observed, confidence=1.0) | living',
+                    '  transliteration: (A life without self-reflection | has no (inferred, confidence=0.9) | value)',
+                    "- Transliteration tags/confidence follow the same rules as main premises.",
                     "IMPORTANT: The Entailed Premises section MUST contain at least one triplet.",
                     "Never leave Entailed Premises empty.",
                     "",
@@ -160,6 +159,39 @@ class SupervisionPromptContractTests(unittest.TestCase):
                 ]
             ),
         )
+
+    def test_transliteration_interleaving_in_output_text(self) -> None:
+        """When entailed_transliterations is provided, each verbatim line is followed by its paren triplet."""
+        rec = make_structured_record()
+        rec["entailed_transliterations"] = [
+            "(human beings | possess (inferred, confidence=0.9) | distinct identities)",
+            "(being genuine | is (inferred, confidence=0.8) | the sole path to true selfhood)",
+        ]
+        record = serialize_training_record(rec)
+        self.assertIn(
+            "people | are (observed, confidence=1.0) | unique individuals\n"
+            "(human beings | possess (inferred, confidence=0.9) | distinct identities)",
+            record["output_text"],
+        )
+        self.assertIn(
+            "authenticity | is (inferred, confidence=0.5) | the only way to be oneself\n"
+            "(being genuine | is (inferred, confidence=0.8) | the sole path to true selfhood)",
+            record["output_text"],
+        )
+
+    def test_transliteration_absent_when_not_provided(self) -> None:
+        """When entailed_transliterations is absent, output_text is unchanged from v12 format."""
+        record = serialize_training_record(make_structured_record())
+        # No paren lines should appear in the Entailed block
+        in_entailed = False
+        for line in record["output_text"].splitlines():
+            if line.startswith("Entailed Premises:"):
+                in_entailed = True
+                continue
+            if line.startswith("Throughline:"):
+                break
+            if in_entailed and line.startswith("(") and "|" in line:
+                self.fail(f"Unexpected transliteration line without transliterations: {line!r}")
 
 
 if __name__ == "__main__":

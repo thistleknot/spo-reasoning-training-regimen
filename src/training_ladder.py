@@ -223,6 +223,61 @@ def check_avg_score_tier3(output: str, record: dict) -> bool:
     return score >= 0.80
 
 
+# transliteration: parenthetical paraphrase triplet after each entailed verbatim line
+_TRANSLIT_RE = re.compile(r"^\(([^|)]+)\|([^|)]+)\|([^|)]+)\)\s*$")
+
+
+def _extract_entailed_block_lines(output: str) -> list[str]:
+    """Return raw lines from the Entailed Premises section, including paren lines."""
+    lines = output.splitlines()
+    capturing = False
+    result = []
+    for line in lines:
+        if re.match(r"Entailed Premises\s*:", line, re.IGNORECASE):
+            capturing = True
+            inline = line.split(":", 1)[-1].strip()
+            if inline:
+                result.append(inline)
+            continue
+        if capturing:
+            if re.match(
+                r"^(Non-Entailed Premises|Throughline|Syllogism)\s*:",
+                line, re.IGNORECASE
+            ):
+                break
+            if line.strip():
+                result.append(line.strip())
+    return result
+
+
+def check_transliteration_present(output: str, _record: dict) -> bool:
+    """At least one transliteration line (a paren-wrapped S|P|O) appears in the Entailed section."""
+    for line in _extract_entailed_block_lines(output):
+        if _TRANSLIT_RE.match(line):
+            return True
+    return False
+
+
+def check_transliteration_format(output: str, _record: dict) -> bool:
+    """All transliteration lines that ARE present match (S | P (tag, conf=N) | O) format.
+
+    Only checks lines that look like transliterations (start+end with parens and
+    contain exactly 2 pipes).  Returns True when no transliteration lines exist
+    (format vacuously satisfied) so early tiers are not penalised.
+    """
+    tag_conf_re = re.compile(
+        r"\(\s*(observed|inferred)\s*,\s*confidence\s*=\s*[0-9]", re.IGNORECASE
+    )
+    for line in _extract_entailed_block_lines(output):
+        m = _TRANSLIT_RE.match(line)
+        if not m:
+            continue
+        predicate_field = m.group(2)
+        if not tag_conf_re.search(predicate_field):
+            return False
+    return True
+
+
 # ── tier definitions ──────────────────────────────────────────────────────────
 
 
@@ -289,9 +344,11 @@ def _make_tiers() -> list[TierSpec]:
     ]
     # Tier 3 adds format convergence checks on top of tier2 content checks.
     tier3_checks = tier2_checks[:-1] + [  # swap tier2 score gate for tier3
-        ("confidence_numeric",   check_confidence_numeric),
-        ("canonical_tag_format", check_canonical_tag_format),
-        ("avg_score_tier3",      check_avg_score_tier3),
+        ("confidence_numeric",        check_confidence_numeric),
+        ("canonical_tag_format",      check_canonical_tag_format),
+        ("transliteration_present",   check_transliteration_present),
+        ("transliteration_format",    check_transliteration_format),
+        ("avg_score_tier3",           check_avg_score_tier3),
     ]
 
     return [
@@ -348,13 +405,15 @@ def _make_tiers() -> list[TierSpec]:
             #   avg_score (>= 0.65):   55-65% — lowered from 0.85 target
             thresholds={
                 **{c: 0.90 for c, _ in tier0_checks},
-                "entailed_non_empty":   0.75,  # v12c observed 65%; inline-header fix adds ~10%
-                "tags_exclusive":       0.90,  # 100% on v11 after annotation-position fix
-                "confidence_numeric":   0.80,  # normalisation covers <X>, -X, word,conf=N
-                "canonical_tag_format": 0.70,  # full normalization suite raises from 30%→85%+
-                "sections_distinct":    0.90,
-                "verbatim_entailed":    0.55,
-                "avg_score_tier3":      0.55,  # v12c observed 55%; accept with clean passes
+                "entailed_non_empty":        0.75,  # v12c observed 65%; inline-header fix adds ~10%
+                "tags_exclusive":            0.90,  # 100% on v11 after annotation-position fix
+                "confidence_numeric":        0.80,  # normalisation covers <X>, -X, word,conf=N
+                "canonical_tag_format":      0.70,  # full normalization suite raises from 30%→85%+
+                "sections_distinct":         0.90,
+                "verbatim_entailed":         0.55,
+                "transliteration_present":   0.55,  # new feature: conservative first-run threshold
+                "transliteration_format":    0.50,  # paren (tag, conf=N) format gate
+                "avg_score_tier3":           0.55,  # v12c observed 55%; accept with clean passes
             },
         ),
     ]

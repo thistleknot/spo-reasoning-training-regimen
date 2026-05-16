@@ -591,6 +591,132 @@ class TestVerbatimFaithfulnessGate(unittest.TestCase):
         )
 
 
+class TestTrainingLadderCheckFunctions(unittest.TestCase):
+    """Unit tests for check functions in src.training_ladder.
+
+    Covers the three functions that were fixed in v11:
+      1. _normalize_confidence_syntax  — normalises <X> and "X" delimiters
+      2. check_confidence_numeric      — now normalises before parsing
+      3. check_canonical_tag_format    — now normalises before regex
+      4. check_tags_exclusive          — uses annotation-position matching
+    """
+
+    def setUp(self) -> None:
+        from src.training_ladder import (
+            _normalize_confidence_syntax,
+            check_confidence_numeric,
+            check_canonical_tag_format,
+            check_tags_exclusive,
+        )
+        self.norm = _normalize_confidence_syntax
+        self.conf_numeric = check_confidence_numeric
+        self.canon_fmt = check_canonical_tag_format
+        self.tags_excl = check_tags_exclusive
+
+    # ── _normalize_confidence_syntax ─────────────────────────────────────────
+
+    def test_normalize_angle_bracket_value(self) -> None:
+        """confidence=<0.7> → confidence=0.7"""
+        result = self.norm("(inferred, confidence=<0.7>)")
+        self.assertIn("confidence=0.7", result)
+        self.assertNotIn("<", result)
+
+    def test_normalize_unterminated_angle_bracket(self) -> None:
+        """confidence=<0.7 (no closing >) → confidence=0.7"""
+        result = self.norm("(inferred, confidence=<0.7)")
+        self.assertIn("confidence=0.7", result)
+
+    def test_normalize_quoted_numeric(self) -> None:
+        """confidence=\"0.7\" → confidence=0.7"""
+        result = self.norm('(observed, confidence="0.9")')
+        self.assertIn("confidence=0.9", result)
+        self.assertNotIn('"', result)
+
+    def test_normalize_leaves_non_numeric_quoted_alone(self) -> None:
+        """confidence=\"inferred\" must NOT be rewritten (not a number)."""
+        original = '(observed, confidence="inferred")'
+        result = self.norm(original)
+        self.assertEqual(result, original)
+
+    def test_normalize_idempotent_on_correct_format(self) -> None:
+        """Already-correct format must be unchanged."""
+        line = "(inferred, confidence=0.8)"
+        self.assertEqual(self.norm(line), line)
+
+    # ── check_confidence_numeric ─────────────────────────────────────────────
+
+    def test_angle_bracket_value_passes_after_normalisation(self) -> None:
+        output = "subject | (inferred, confidence=<0.7) | object"
+        self.assertTrue(self.conf_numeric(output, {}))
+
+    def test_quoted_numeric_passes_after_normalisation(self) -> None:
+        output = 'subject | (observed, confidence="0.9") | object'
+        self.assertTrue(self.conf_numeric(output, {}))
+
+    def test_tag_word_as_value_still_fails(self) -> None:
+        """confidence=\"inferred\" is not a valid float — must fail."""
+        output = '(observed, confidence="inferred") | object'
+        self.assertFalse(self.conf_numeric(output, {}))
+
+    def test_negative_confidence_fails(self) -> None:
+        output = "(inferred, confidence=-0.5) | object"
+        self.assertFalse(self.conf_numeric(output, {}))
+
+    def test_valid_numeric_confidence_passes(self) -> None:
+        output = "subject | (observed, confidence=0.85) | object"
+        self.assertTrue(self.conf_numeric(output, {}))
+
+    # ── check_canonical_tag_format ───────────────────────────────────────────
+
+    def test_angle_bracket_format_passes_after_normalisation(self) -> None:
+        output = "subject | (inferred, confidence=<0.7) | object"
+        self.assertTrue(self.canon_fmt(output, {}))
+
+    def test_quoted_format_passes_after_normalisation(self) -> None:
+        output = 'subject | (observed, confidence="1.0") | object'
+        self.assertTrue(self.canon_fmt(output, {}))
+
+    def test_no_confidence_fails(self) -> None:
+        output = "subject | predicate | object\nno annotations here"
+        self.assertFalse(self.canon_fmt(output, {}))
+
+    def test_tag_word_as_value_fails(self) -> None:
+        output = '(observed, confidence="inferred") | object'
+        self.assertFalse(self.canon_fmt(output, {}))
+
+    # ── check_tags_exclusive ─────────────────────────────────────────────────
+
+    def test_single_tag_per_line_passes(self) -> None:
+        output = (
+            "subject | (observed, confidence=0.9) | object\n"
+            "other | (inferred, confidence=0.7) | thing"
+        )
+        self.assertTrue(self.tags_excl(output, {}))
+
+    def test_both_tags_on_same_line_fails(self) -> None:
+        output = "subject | (observed, inferred, confidence=0.8) | object"
+        self.assertFalse(self.tags_excl(output, {}))
+
+    def test_confidence_inferred_value_does_not_trigger_false_positive(self) -> None:
+        """confidence=\"inferred\" puts 'inferred' in the line value — must not count as tag."""
+        output = 'subject | (observed, confidence="inferred") | object'
+        self.assertTrue(self.tags_excl(output, {}))
+
+    def test_observed_vertical_bar_inferred_both_annotation_fails(self) -> None:
+        """(observed|inferred, ...) has both tags in annotation — must fail."""
+        output = "subject | (observed|inferred, confidence=0.9) | object"
+        self.assertFalse(self.tags_excl(output, {}))
+
+    def test_lines_without_pipe_ignored(self) -> None:
+        """Non-triplet lines (headers, throughline) must not cause false failures."""
+        output = (
+            "Entailed Premises:\n"
+            "subject | (observed, confidence=0.9) | object\n"
+            "Throughline: observed inferred both words here"
+        )
+        self.assertTrue(self.tags_excl(output, {}))
+
+
 if __name__ == "__main__":
     unittest.main()
 

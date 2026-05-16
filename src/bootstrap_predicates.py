@@ -34,6 +34,15 @@ from pathlib import Path
 MIN_PREDICATE_LEN = 2
 MAX_PREDICATE_LEN = 40
 
+# Copula/auxiliary verbs used as fallback predicate when span extraction fails.
+# Ordered longest-first so "is not" matches before "is".
+_COPULA_RE = re.compile(
+    r'\b(is not|are not|was not|were not|has not|have not|had not'
+    r'|is|are|was|were|has|have|had|do not|does not|did not|do|does|did'
+    r'|can|could|should|would|will|may|might|must|shall)\b',
+    re.IGNORECASE,
+)
+
 # Pattern to detect bare tag: middle field has ONLY a tag word (no predicate text)
 _BARE_TAG_FIELD_RE = re.compile(r'^\s*(observed|inferred)\s*$', re.IGNORECASE)
 # Already has canonical annotation (predicate text present before or after tag annotation)
@@ -42,57 +51,97 @@ _CANONICAL_ANNOT_RE = re.compile(
     re.IGNORECASE,
 )
 # Strip leading/trailing punctuation/whitespace from extracted predicate span
-_STRIP_BOUNDS_RE = re.compile(r'^[\s,;:.!?\"\'""'']+|[\s,;:.!?\"\'""'']+$')
+_STRIP_BOUNDS_RE = re.compile(r'^[\s,;:.!?\"\'"\u201c\u201d\u2018\u2019]+|[\s,;:.!?\"\'"\u201c\u201d\u2018\u2019]+$')
+# Strip surrounding quotes/asterisks/bullets from S/O fields before quote search
+_FIELD_STRIP_RE = re.compile(r'^[\s*""\u201c\u201d\'\']+|[\s*""\u201c\u201d\'\']+$')
+
+
+def _normalize_field(text: str) -> str:
+    """Strip bullets, asterisks, and smart-quotes from a subject/object field."""
+    return _FIELD_STRIP_RE.sub('', text).strip()
+
+
+def _copula_fallback(subject: str, quote: str) -> str | None:
+    """Find the first copula verb in the quote sentence containing the subject.
+
+    Preconditions: subject is a normalized (stripped) field value.
+    Guarantee: returns the matched copula text verbatim from quote, or None.
+    Failure modes: returns None if subject not found in quote or no copula present.
+    """
+    q_lower = quote.lower()
+    s = subject.lower()
+    s_pos = q_lower.find(s)
+    if s_pos == -1:
+        return None
+    # Search for copula starting from the end of the subject
+    after_s = s_pos + len(s)
+    m = _COPULA_RE.search(quote, after_s)
+    if m and m.start() - after_s <= 5:  # copula must be within 5 chars of subject end
+        return m.group(0)
+    return None
 
 
 def _extract_predicate_from_quote(subject: str, obj: str, quote: str) -> str | None:
     """Extract verbatim predicate text between subject and object in the quote.
 
+    Tries three strategies in order:
+    1. Forward span: text between end-of-subject and start-of-object.
+    2. Reversed span: when object appears before subject (text between end-of-object
+       and start-of-subject).
+    3. Copula fallback: first copula verb appearing after the subject in the quote.
+
     Preconditions:
         subject and object are verbatim spans from quote (case-insensitive).
+        Leading/trailing punctuation is stripped from subject/object before search.
     Guarantee:
-        Returns the verbatim text (from original quote) between the end of
-        subject and the start of object.  Returns None if either span is
-        not found, order is reversed, or the extracted text fails length gates.
+        Returns verbatim text from the original quote that can serve as a predicate.
+        Returns None if all strategies fail or the extracted span is unusable.
     Failure modes:
-        Returns None if subject/object overlap, span is empty, or is purely
-        punctuation/whitespace.
+        Returns None when subject == object (tautological triplet), when neither
+        appears in the quote, or when the extracted text is purely punctuation.
     """
     q = str(quote)
     q_lower = q.lower()
-    s = subject.lower().strip()
-    o = obj.lower().strip()
+    s = _normalize_field(subject).lower()
+    o = _normalize_field(obj).lower()
     if not s or not o:
         return None
+    # Tautological triplet — no predicate can be meaningfully extracted
+    if s == o:
+        return None
 
+    # Strategy 1: forward span (S … O order in quote)
     s_pos = q_lower.find(s)
-    if s_pos == -1:
-        return None
-    after_s = s_pos + len(s)
+    if s_pos != -1:
+        after_s = s_pos + len(s)
+        o_pos = q_lower.find(o, after_s)
+        if o_pos != -1:
+            between = _STRIP_BOUNDS_RE.sub('', q[after_s:o_pos])
+            if MIN_PREDICATE_LEN <= len(between) <= MAX_PREDICATE_LEN and re.search(r'[a-zA-Z]', between):
+                return between
 
-    o_pos = q_lower.find(o, after_s)
-    if o_pos == -1:
-        return None
+    # Strategy 2: reversed span (O … S order in quote)
+    o_pos_rev = q_lower.find(o)
+    if o_pos_rev != -1:
+        after_o = o_pos_rev + len(o)
+        s_pos_rev = q_lower.find(s, after_o)
+        if s_pos_rev != -1:
+            between = _STRIP_BOUNDS_RE.sub('', q[after_o:s_pos_rev])
+            if MIN_PREDICATE_LEN <= len(between) <= MAX_PREDICATE_LEN and re.search(r'[a-zA-Z]', between):
+                return between
 
-    # verbatim span from the original cased quote
-    between = q[after_s:o_pos]
-    between = _STRIP_BOUNDS_RE.sub('', between)
+    # Strategy 3: copula fallback (find first verb after subject in quote)
+    if s_pos != -1:
+        return _copula_fallback(s, q)
 
-    if len(between) < MIN_PREDICATE_LEN or len(between) > MAX_PREDICATE_LEN:
-        return None
-
-    # Must contain at least one letter
-    if not re.search(r'[a-zA-Z]', between):
-        return None
-
-    return between
+    return None
 
 
-def _inject_predicate_into_triplet(triplet: str, quote: str) -> str:
+def _inject_predicate_into_triplet(triplet: str, quote: str) -> str | None:
     """Inject a verbatim predicate into a bare-tag triplet.
 
-    If the middle field already has a predicate (not a bare tag), returns
-    the triplet unchanged.  If extraction fails, returns unchanged.
+    Returns None for tautological triplets (subject == object) so callers can
+    filter them out.  Returns the triplet unchanged if extraction fails.
 
     Input:  'room without books | inferred | body without a soul'
     Output: 'room without books | is like a inferred | body without a soul'
@@ -103,6 +152,10 @@ def _inject_predicate_into_triplet(triplet: str, quote: str) -> str:
         return triplet
 
     subject, relation, obj = parts
+
+    # Filter tautological triplets before any further work
+    if _normalize_field(subject).lower() == _normalize_field(obj).lower():
+        return None  # discard
 
     # Skip if relation already has a canonical annotation (predicate present)
     if _CANONICAL_ANNOT_RE.search(relation):
@@ -129,14 +182,18 @@ def inject_predicates(record: dict) -> dict:
         record has 'quote', 'entailed_premises' keys.
     Guarantee:
         Returns a new dict; entailed_premises entries are rewritten where possible.
+        Tautological triplets (subject == object) are dropped.
         Non-entailed premises are left unchanged.
     """
     quote = str(record.get('quote', ''))
     entailed = record.get('entailed_premises', [])
-    new_entailed = [
-        _inject_predicate_into_triplet(t, quote) if isinstance(t, str) else t
-        for t in entailed
-    ]
+    new_entailed = []
+    for t in entailed:
+        if not isinstance(t, str):
+            continue
+        result = _inject_predicate_into_triplet(t, quote)
+        if result is not None:  # None means tautological — drop it
+            new_entailed.append(result)
     return {**record, 'entailed_premises': new_entailed}
 
 

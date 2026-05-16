@@ -720,3 +720,85 @@ class TestTrainingLadderCheckFunctions(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
+
+
+class TestBootstrapPredicates(unittest.TestCase):
+    """Tests for bootstrap_predicates improvements: reversed-order, copula fallback, tautology filter."""
+
+    def setUp(self):
+        from src.bootstrap_predicates import (
+            _extract_predicate_from_quote,
+            _inject_predicate_into_triplet,
+            inject_predicates,
+        )
+        self.extract = _extract_predicate_from_quote
+        self.inject = _inject_predicate_into_triplet
+        self.inject_record = inject_predicates
+
+    def test_forward_span_basic(self):
+        pred = self.extract("The unexamined life", "living", "The unexamined life is not worth living.")
+        self.assertEqual(pred, "is not worth")
+
+    def test_reversed_order_span(self):
+        # "forget to live" appears AFTER "dwell on dreams" in the quote
+        pred = self.extract("forget to live", "dwell on dreams",
+                            "It does not do to dwell on dreams and forget to live.")
+        self.assertIsNotNone(pred)
+        self.assertIn("and", pred)
+
+    def test_tautological_returns_none(self):
+        # S == O: tautological triplet — should return None
+        pred = self.extract("I make mistakes", "I make mistakes", "I make mistakes.")
+        self.assertIsNone(pred)
+
+    def test_copula_fallback(self):
+        # span between S and O is empty (adjacent), fallback to copula
+        pred = self.extract("two things", "infinite",
+                            "Two things are infinite: the universe and human stupidity.")
+        self.assertIsNotNone(pred)
+        self.assertIn("are", pred.lower())
+
+    def test_quote_stripping_in_subject(self):
+        # Subject has surrounding quotes in triplet field
+        pred = self.extract('"remain silent"', '"thought a fool"',
+                            'It is better to remain silent at the risk of being thought a fool.')
+        self.assertIsNotNone(pred)
+
+    def test_inject_tautological_drops_triplet(self):
+        t = "I make mistakes | inferred | I make mistakes"
+        result = self.inject(t, "I make mistakes.")
+        self.assertIsNone(result)
+
+    def test_inject_already_canonical_unchanged(self):
+        t = "The unexamined life | is not worth (observed, confidence=1.0) | living"
+        result = self.inject(t, "The unexamined life is not worth living.")
+        self.assertEqual(result, t)
+
+    def test_inject_injects_verb(self):
+        t = "The unexamined life | inferred | living"
+        result = self.inject(t, "The unexamined life is not worth living.")
+        self.assertIsNotNone(result)
+        parts = result.split("|")
+        self.assertEqual(len(parts), 3)
+        self.assertIn("is not worth", parts[1])
+
+    def test_inject_record_drops_tautological(self):
+        rec = {
+            "quote": "I make mistakes.",
+            "entailed_premises": [
+                "I make mistakes | inferred | I make mistakes",
+                "mistakes | are (observed, confidence=1.0) | inevitable",
+            ],
+            "non_entailed_premises": [],
+            "syllogism": "",
+        }
+        out = self.inject_record(rec)
+        # Tautological triplet dropped; clean one preserved
+        self.assertEqual(len(out["entailed_premises"]), 1)
+        self.assertIn("inevitable", out["entailed_premises"][0])
+
+    def test_exactly_two_pipes_enforced_in_generator(self):
+        from src.generate_verbatim_corpus import _TRIPLET_LINE_RE
+        self.assertIsNotNone(_TRIPLET_LINE_RE.match("S | verb (observed, confidence=1.0) | O"))
+        self.assertIsNone(_TRIPLET_LINE_RE.match("S | P | confidence=0.0 | O"))
+        self.assertIsNone(_TRIPLET_LINE_RE.match("S | (inferred) | C | D | E"))

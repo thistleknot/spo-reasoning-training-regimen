@@ -46,35 +46,49 @@ DEFAULT_CHECKPOINT = "data/gen_verbatim_checkpoint.db"
 # Prompt
 # ---------------------------------------------------------------------------
 
+_FEW_SHOT_EXAMPLES = """\
+EXAMPLES — the predicate MUST be a verb phrase from the quote, never just a tag word:
+
+Quote: "The unexamined life is not worth living."
+Non-Entailed Premises:
+reflection | leads to (inferred, confidence=0.8) | self-knowledge
+Entailed Premises:
+The unexamined life | is not worth (observed, confidence=1.0) | living
+Throughline: A life without self-examination lacks meaning.
+
+Quote: "Success usually comes to those who are too busy to be looking for it."
+Non-Entailed Premises:
+obsession with success | prevents (inferred, confidence=0.75) | achievement
+Entailed Premises:
+Success | usually comes to (observed, confidence=1.0) | those who are too busy to be looking for it
+Throughline: Focused action produces success more than deliberate pursuit.
+
+RULES: exactly 2 pipes per triplet (3 fields). Predicate = verb phrase + (tag, confidence=N.N). Never bare (inferred) or (observed) alone as predicate."""
+
+
 def build_prompt(quote: str) -> str:
     """Return the user-turn text for the verbatim-extraction task.
 
-    Used with apply_chat_template so the model generates in its native format.
-    Short and direct — the chat template provides structural grounding.
+    Preconditions: quote is a non-empty string.
+    Guarantee: returned prompt includes few-shot examples showing verb-phrase predicates.
+    Failure modes: empty quote yields a degenerate prompt but will not raise.
     """
     q = quote.strip().strip('"').strip('\u201c').strip('\u201d').strip()
     return (
-        f'Analyze this quote and extract its implicit logical structure.\n\n'
+        f'{_FEW_SHOT_EXAMPLES}\n'
+        f'Now extract for this quote:\n\n'
         f'Quote: "{q}"\n\n'
-        f'Output exactly these three sections (headers verbatim):\n\n'
         f'Non-Entailed Premises:\n'
-        f'<subject> | <relation> (observed|inferred, confidence=X.X) | <object>\n\n'
-        f'Entailed Premises:\n'
-        f'<subject> | <relation> (observed|inferred, confidence=X.X) | <object>\n\n'
-        f'Throughline:\n'
-        f'<one sentence conclusion>\n\n'
-        f'CRITICAL: In Entailed Premises, <subject>, <relation>, AND <object> must be exact verbatim words/phrases from the quote — not paraphrased. '
-        f'Invariant: strip all (...) from a triplet and the remaining S|P|O text must come directly from the quote. '
-        f'Use | as separator.'
     )
 
 
 SYSTEM_PROMPT = (
     "You are a reasoning-extraction assistant. "
-    "Given a quote, you extract implicit premises and a conclusion in a structured triplet format. "
-    "Non-Entailed Premises use your own words. "
-    "Entailed Premises must use verbatim text from the quote as subject, predicate (relation), and object. "
-    "Invariant: stripping all parenthetical content from an Entailed triplet must yield only verbatim words from the quote. "
+    "Given a quote, extract implicit premises and a conclusion in structured triplet format. "
+    "Each triplet has exactly 3 pipe-separated fields: subject | verb_phrase (tag, confidence=N.N) | object. "
+    "The predicate (middle field) MUST be a verb phrase — never just a bare tag word like 'inferred' or 'observed'. "
+    "For Entailed Premises, subject, verb phrase, and object must be verbatim words from the quote. "
+    "Non-Entailed Premises may use your own words. "
     "Always output exactly three labelled sections."
 )
 
@@ -90,7 +104,8 @@ _SECTION_RE = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 
-_TRIPLET_LINE_RE = re.compile(r'.+\|.+\|.+')
+# Exactly 2 pipes → 3 fields (S|P|O). Lines with more pipes are malformed and rejected.
+_TRIPLET_LINE_RE = re.compile(r'^[^|]+\|[^|]+\|[^|]+$')
 
 
 def _parse_section_lines(text: str) -> list[str]:
@@ -120,7 +135,12 @@ def parse_output(quote: str, text: str) -> Optional[dict]:
         throughline = (m.group(3) or "").strip().splitlines()[0].strip() if m.group(3) else ""
 
     if not ent and not non_ent:
-        return None  # completely empty output — skip
+        # Last-resort: no section headers found — collect all valid triplet lines as entailed.
+        # This handles models that output triplets verbatim without section scaffolding.
+        all_triplets = _parse_section_lines(text)
+        if not all_triplets:
+            return None
+        ent = all_triplets
 
     return {
         "quote": quote,

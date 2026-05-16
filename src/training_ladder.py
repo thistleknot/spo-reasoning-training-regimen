@@ -96,7 +96,12 @@ def check_entailed_non_empty(output: str, _record: dict) -> bool:
 
 def check_pipes_well_formed(output: str, _record: dict) -> bool:
     """At least one subject|relation|object triplet exists anywhere in the output."""
-    pipe_re = re.compile(r".+\|.+\|.+")
+    """At least one well-formed S|P|O triplet line exists in the output.
+
+    Requires exactly 2 pipes (3 fields). Lines with more pipes are malformed
+    (e.g. 'S | tag | confidence=0.0 | O' has 3 pipes and is rejected).
+    """
+    pipe_re = re.compile(r"^[^|]+\|[^|]+\|[^|]+$")
     return any(pipe_re.match(l.strip()) for l in output.splitlines())
 
 def check_no_template_leakage(output: str, _record: dict) -> bool:

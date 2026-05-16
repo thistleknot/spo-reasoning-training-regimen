@@ -320,6 +320,7 @@ def _make_tiers() -> list[TierSpec]:
             # Format checks deferred to tier3 where 1089×5ep drives them to target.
             thresholds={
                 **{c: 0.85 for c, _ in tier0_checks},
+                "headers":              0.80,  # 30-sample holdout noise; tier3 enforces 0.90
                 "tags_exclusive":       0.85,  # measured 97% on 200×2ep v11
                 "sections_distinct":    0.85,
                 "verbatim_entailed":    0.45,

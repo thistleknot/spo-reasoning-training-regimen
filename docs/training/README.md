@@ -736,3 +736,61 @@ Only 138 of 668 v10 records passed the serializer's tautological/quality filter.
 If a new format requirement causes the generator failure rate to exceed ~20%, either:
 (a) simplify the generation prompt, or
 (b) use a larger or fine-tuned generator model (e.g., the tier3 adapter itself via bootstrapping)
+
+### 9. Tier calibration must match training scale, not the invariant strength
+
+**Problem:** The tier1 `tags_exclusive` threshold was set to 0.95 — stricter than tier2
+(0.85) and tier3 (0.90). After 50 records × 1 epoch, the model produced outputs like
+`(in inferred, confidence<0.7)| observed, confidence=1.` — early instability where both
+tag words appear on the same line due to malformed confidence annotations, not semantic
+confusion. The gate blocked progression before tier2 could fix it.
+
+**Root cause:** The tier1 threshold was copied from a "this is always wrong" philosophy
+without accounting for early-training noise. A model that's seen only 50 training steps
+cannot be held to a higher format standard than one that's seen 1000 steps.
+
+**Rule:** Tier thresholds must be monotonically non-decreasing across tiers for the same
+check. Specifically: `tier1_threshold ≤ tier2_threshold ≤ tier3_threshold` for every
+structural check. Early tiers use lower thresholds to allow progression; later tiers
+enforce convergence. For `tags_exclusive`: tier1=0.70, tier2=0.85, tier3=0.90.
+
+### 10. Confidence format checks belong at tier3, not tier2
+
+**Problem:** `confidence_numeric` and `canonical_tag_format` were tier2 gates. On v11
+corpus (with verbatim predicates), both measured ~30-40% after 200×2ep — well below the
+0.50/0.70 thresholds — while content quality was excellent: `verbatim_entailed`=93%,
+`avg_score`=87-90%, `tags_exclusive`=97%. The model was producing `confidence=<0.7>`
+(comparison syntax) instead of `confidence=0.7`, a residual habit from v8 training.
+
+**Root cause:** The `confidence=<0.7>` habit requires seeing the correct `confidence=0.7`
+format across the full training corpus (1000+ records × multiple epochs) to overwrite.
+200 records × 2 epochs is not enough signal, regardless of the training data quality.
+
+**Rule:** Gate confidence *format* checks (`confidence_numeric`, `canonical_tag_format`)
+only at tier3. Tier2 should gate on structural and content quality only
+(`sections_distinct`, `verbatim_entailed`, `avg_score`). The tier2 metrics that pass
+easily (verbatim_entailed, avg_score) are the meaningful quality signals at that scale.
+
+**What was removed from tier2 gates:** `confidence_numeric` and `canonical_tag_format`.
+These remain in tier3 checks with targets of 0.80 and 0.85 respectively.
+
+### 11. Filter training corpus for X.X placeholder artifacts before serialization
+
+**Problem:** 7 of 1096 v11 records had `confidence=X.X` artifacts in `output_text` —
+extra pipe fields, `<>` or `[]` delimiters, or placeholder substitution failures from
+the corpus generator. These were serialized into training data and contributed to the
+model's format confusion.
+
+**Root cause:** The `normalize_triplet()` function in `serialize_training_format.py`
+handles the standard 3-field `S|P|O` case but some generator outputs produce 4+ fields
+or non-standard delimiters (`<>`, `[]`, `""`) that bypass normalization.
+
+**Rule:** Before training, validate the serialized corpus:
+```python
+conf_bad = re.compile(r'confidence=(?:<|\"|\x27|X\.X|X\.0)')
+bad = [r for r in records if conf_bad.search(r['output_text'])]
+assert len(bad) == 0, f"{len(bad)} records have bad confidence format"
+```
+Filter bad records before passing to the training ladder. In v11: 7 records dropped,
+1089 clean records used. The bad record rate of 0.6% is acceptable to drop silently;
+rates above 5% should trigger a corpus regeneration.

@@ -541,3 +541,102 @@ device_map="cpu"
 - `../inference/README.md` — Model inference configuration
 - `../../data/examples_training_format.jsonl` — Example training data
 - `../../src/spo_trainer.py` — SPO implementation
+
+---
+
+## Lessons Learned: Hierarchical Training Ladder
+
+`src/training_ladder.py` implements a 4-tier gated validation topology. The
+lessons below were hard-won during calibration and must not be repeated.
+
+### 1. Use the scorer's own internals as check functions
+
+**Problem:** Custom string-search checks (e.g., `"Entailed Premises:" in output`)
+disagree with the scorer. `SPOEvaluator._header_score()` requires headers on their
+own line with no `|`. A model outputting `Entailed Premises: | triplet |...` would
+pass our check but score 0 on headers.
+
+**Rule:** Every tier check delegates to `SPOEvaluator` internals:
+- `check_headers` → `SPOEvaluator._header_score() >= 1.0`
+- `check_entailed_non_empty` → `SPOEvaluator._extract_section_triplets()`
+- `check_verbatim_entailed` → `SPOEvaluator._entailed_verbatim_ratio()`
+- `check_avg_score_*` → `SPOEvaluator.evaluate_triplet_correctness()`
+
+If the scorer changes, the checks automatically track it.
+
+### 2. Inference must use the chat template
+
+**Problem:** `_generate_outputs` was calling `tokenizer(raw_input_text)` without
+applying the chat template. Qwen instruct models expect `<|im_start|>user ... <|im_end|>`
+wrap. Without it the model outputs degenerate inline format: headers followed by pipe
+content on the same line, repetition loops, no section structure.
+
+**Symptom:** Tier 0 reported `headers: 10%` even though the holdout examples showed
+`headers: 85%+`. The discrepancy was entirely the chat template.
+
+**Rule:** Inference in the ladder must match `gen_spo_holdout.py` exactly:
+```python
+chat_prompt = build_generation_prompt(tokenizer, rec["input_text"])
+inputs = tokenizer(chat_prompt, return_tensors="pt", add_special_tokens=False)
+model.generate(..., no_repeat_ngram_size=6, use_cache=True)
+output = strip_response_preamble(decoded)
+```
+`no_repeat_ngram_size=6` is mandatory — without it, short quotes trigger repetition
+loops that fill `max_new_tokens` with the same phrase.
+
+### 3. Gate on what is detectable at each training scale
+
+**Problem:** Tier 1 (50 rec × 1 ep) gated on `confidence_numeric >= 90%`. A model
+trained for 3 full epochs on `confidence=X` will not drop that habit in 50 steps.
+Result: permanent false-negative FAIL at Tier 1 on every run from the v8 adapter.
+
+**Rule:** Calibrate each tier's gates to what that scale can realistically change:
+
+| Tier | Scale | What changes | What doesn't |
+|------|-------|-------------|--------------|
+| 0 | zero-shot | — | — (sanity: does adapter know the format?) |
+| 1 | 50 rec × 1 ep | Structure preservation detectable | Cannot break multi-epoch annotation habits |
+| 2 | 200 rec × 2 ep | Annotation format starts to converge | May still echo placeholders partially |
+| 3 | 900 rec × 5 ep | Full convergence | — |
+
+Confidence annotation (numeric vs placeholder echo) requires **Tier 2+** to gate on.
+Tag vocabulary (`both_tag_types`) requires only **Tier 1** to confirm existence, not mastery.
+
+### 4. Make numeric checks fractional, not all-or-nothing
+
+**Problem:** `check_confidence_numeric` used `all(is_valid(v) for v in vals)`.
+A single `confidence=N` placeholder in an otherwise good output causes the whole
+sample to fail. This dramatically deflates pass-rates mid-training.
+
+**Rule:** Use fractional checks at the sample level:
+```python
+valid_count = sum(1 for v in vals if _valid(v))
+return valid_count / len(vals) >= 0.50
+```
+This aligns with the scorer's partial-credit philosophy and avoids noise from
+one bad triplet in an otherwise converged output.
+
+### 5. Short quotes naturally use only one tag type
+
+**Problem:** `both_tag_types` gated at 0.75 at Tier 2. A quote like "So many books,
+so little time" only produces 1-2 triplets — there may be no natural place to use
+both `observed` and `inferred`. The model isn't wrong; the input constrains it.
+
+**Rule:** `both_tag_types` is a vocabulary existence check (does the model know both
+words?), not a mastery check. Floor at Tier 1: 0.35. Floor at Tier 2: 0.40.
+Full mastery (> 0.80) belongs at Tier 3 with multi-sentence inputs in the holdout.
+
+### Empirical baselines (v8 adapter → v9 corpus)
+
+| Check | Tier 0 (zero-shot) | Tier 1 (50×1ep) | Tier 2 (200×2ep) |
+|-------|--------------------|-----------------|------------------|
+| headers | 100% | 100% | 90% |
+| entailed_non_empty | 100% | 80% | 93% |
+| pipes_well_formed | 100% | 95% | 100% |
+| no_template_leakage | 100% | 95% | 100% |
+| both_tag_types | — | 40% | 43% |
+| confidence_numeric | — | — | 73% |
+| canonical_tag_format | — | — | 87% |
+| sections_distinct | — | — | 100% |
+| verbatim_entailed | — | — | 83% |
+| avg_score (≥0.65) | — | — | 87% |

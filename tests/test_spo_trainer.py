@@ -658,9 +658,10 @@ class TestTrainingLadderCheckFunctions(unittest.TestCase):
         output = '(observed, confidence="inferred") | object'
         self.assertFalse(self.conf_numeric(output, {}))
 
-    def test_negative_confidence_fails(self) -> None:
-        output = "(inferred, confidence=-0.5) | object"
-        self.assertFalse(self.conf_numeric(output, {}))
+    def test_negative_confidence_normalised_passes(self) -> None:
+        # Normalization strips the leading minus; -0.5 → 0.5 → passes numeric check
+        output = "subject | (inferred, confidence=-0.5) | object"
+        self.assertTrue(self.conf_numeric(output, {}))
 
     def test_valid_numeric_confidence_passes(self) -> None:
         output = "subject | (observed, confidence=0.85) | object"

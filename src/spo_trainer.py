@@ -475,6 +475,15 @@ class SPOEvaluator:
         target_header = (section_name + ":").lower()
         for line in lines:
             stripped = line.strip()
+            # Inline target header: "Entailed Premises: triplet on same line"
+            # Standard is_header test misses this because the line doesn't end with ":"
+            if (stripped.lower().startswith(target_header)
+                    and len(stripped) > len(target_header)):
+                inline = stripped[len(target_header):].strip()
+                in_section = True
+                if triplet_re.search(inline):
+                    result.append(inline)
+                continue
             is_header = (
                 stripped.endswith(":")
                 and "|" not in stripped

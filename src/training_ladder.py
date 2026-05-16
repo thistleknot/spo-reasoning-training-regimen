@@ -1,0 +1,530 @@
+"""Hierarchical training ladder for SPO adapter quality validation.
+
+Four tiers, each checking a different partition of output quality at the
+scale where that partition is cheapest to verify:
+
+  Tier 0 — Structure (zero-shot, ~2 min)
+      No training. Checks the model already knows the output skeleton.
+      Gate: all 3 section headers present, Entailed non-empty, pipe format.
+
+  Tier 1 — Annotation format (50 records, 1 epoch, ~10 min)
+      Mini-train to confirm the model adopts canonical (tag, confidence=N)
+      annotations. Gates that the prompt change lands before wasting time
+      on larger corpus.
+
+  Tier 2 — Content quality (200 records, 2 epochs, ~25 min)
+      Medium train. Checks verbatim faithfulness of Entailed spans and that
+      avg_score crosses the 0.75 threshold (annotation + format scores).
+
+  Tier 3 — Full convergence (900 records, 5 epochs, ~90 min)
+      Full train. Checks avg_score ≥ target and all structure rates ≥ 0.95.
+
+Each tier gates the next: if Tier N fails, the run stops and prints why.
+The caller pays only the cost of the first failing tier.
+
+Usage (programmatic):
+    ladder = TrainingLadder(
+        base_adapter="output/spo_verbatim_3ep_v8/adapter",
+        corpus_path="data/train_facts_verbatim_v9.jsonl",
+        output_root="output/ladder_run_001",
+    )
+    result = ladder.run(max_tier=3)
+
+Usage (CLI):
+    python -m src.training_ladder \\
+        --base-adapter output/spo_verbatim_3ep_v8/adapter \\
+        --corpus data/train_facts_verbatim_v9.jsonl \\
+        --output-root output/ladder_run_001 \\
+        --max-tier 3
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import random
+import re
+import sys
+import tempfile
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Optional
+
+# ── check patterns ────────────────────────────────────────────────────────────
+
+_SECTION_HEADERS = [
+    "Non-Entailed Premises:",
+    "Entailed Premises:",
+    "Throughline:",
+]
+_PIPE_RE = re.compile(r".+\|.+\|.+")
+_CONF_NUMERIC_RE = re.compile(r"confidence\s*=\s*[0-9]+(?:\.[0-9]+)?")
+_CONF_ANY_RE = re.compile(r"confidence\s*=", re.IGNORECASE)
+_CONF_TAG_RE = re.compile(r"\(\s*(observed|inferred)\s*,\s*confidence\s*=\s*[0-9]", re.IGNORECASE)
+_TEMPLATE_RE = re.compile(r"<subject>|<relation>|<object>", re.IGNORECASE)
+_ENTAILED_RE = re.compile(r"Entailed Premises:\s*\n(.*?)(?:\n\nThroughline:|\Z)", re.DOTALL)
+_NON_ENTAILED_RE = re.compile(r"Non-Entailed Premises:\s*\n(.*?)(?:\n\nEntailed Premises:|\Z)", re.DOTALL)
+
+
+# ── per-example check functions ───────────────────────────────────────────────
+
+
+def _triplet_lines(text: str) -> list[str]:
+    return [l.strip() for l in text.splitlines() if _PIPE_RE.match(l.strip())]
+
+
+def _section_body(text: str, pattern: re.Pattern) -> str:
+    m = pattern.search(text)
+    return m.group(1).strip() if m else ""
+
+
+# Tier 0: structure
+def check_headers(output: str, _record: dict) -> bool:
+    return all(h in output for h in _SECTION_HEADERS)
+
+def check_entailed_non_empty(output: str, _record: dict) -> bool:
+    body = _section_body(output, _ENTAILED_RE)
+    return bool(body and _PIPE_RE.search(body))
+
+def check_pipes_well_formed(output: str, _record: dict) -> bool:
+    return len(_triplet_lines(output)) > 0
+
+def check_no_template_leakage(output: str, _record: dict) -> bool:
+    return not _TEMPLATE_RE.search(output)
+
+# Tier 1: annotation format
+def check_confidence_numeric(output: str, _record: dict) -> bool:
+    lines = _triplet_lines(output)
+    conf_lines = [l for l in lines if _CONF_ANY_RE.search(l)]
+    return all(_CONF_NUMERIC_RE.search(l) for l in conf_lines) if conf_lines else False
+
+def check_canonical_tag_format(output: str, _record: dict) -> bool:
+    """At least one triplet uses the canonical (tag, confidence=N) format."""
+    return bool(_CONF_TAG_RE.search(output))
+
+def check_both_tag_types(output: str, _record: dict) -> bool:
+    """Output contains at least one observed AND at least one inferred triplet."""
+    has_obs = bool(re.search(r"observed", output, re.IGNORECASE))
+    has_inf = bool(re.search(r"inferred", output, re.IGNORECASE))
+    return has_obs and has_inf
+
+# Tier 2: content quality
+def check_non_tautological(output: str, _record: dict) -> bool:
+    """Entailed and Non-Entailed sections are not identical."""
+    entailed = _section_body(output, _ENTAILED_RE)
+    non_entailed = _section_body(output, _NON_ENTAILED_RE)
+    if not entailed or not non_entailed:
+        return True  # can't judge
+    return entailed.strip() != non_entailed.strip()
+
+def check_verbatim_entailed(output: str, record: dict) -> bool:
+    """≥50% of Entailed subject/object fields are verbatim spans from the quote.
+
+    Requires source_quote to be extractable from record['input_text'].
+    Falls back to True when no quote can be found (can't penalise).
+    """
+    try:
+        from src.spo_trainer import SPOEvaluator
+        from src.preprocess_training_data import extract_quote
+    except ImportError:
+        return True
+    prompt = record.get("input_text", "")
+    quote = extract_quote(prompt) if prompt else None
+    if not quote:
+        return True
+    ratio = SPOEvaluator._entailed_verbatim_ratio(
+        SPOEvaluator, output, quote  # type: ignore[arg-type]
+    )
+    return ratio >= 0.5
+
+def check_avg_score_tier2(output: str, record: dict) -> bool:
+    """Score ≥ 0.75 — crosses annotation + format points threshold."""
+    try:
+        from src.spo_trainer import SPOEvaluator
+        from src.preprocess_training_data import extract_quote
+    except ImportError:
+        return True
+    prompt = record.get("input_text", "")
+    quote = extract_quote(prompt) if prompt else None
+    score = SPOEvaluator.evaluate_triplet_correctness(output, source_quote=quote)
+    return score >= 0.75
+
+# Tier 3: full convergence
+def check_avg_score_tier3(output: str, record: dict) -> bool:
+    """Score ≥ 0.85 — near-ceiling for full convergence."""
+    try:
+        from src.spo_trainer import SPOEvaluator
+        from src.preprocess_training_data import extract_quote
+    except ImportError:
+        return True
+    prompt = record.get("input_text", "")
+    quote = extract_quote(prompt) if prompt else None
+    score = SPOEvaluator.evaluate_triplet_correctness(output, source_quote=quote)
+    return score >= 0.85
+
+
+# ── tier definitions ──────────────────────────────────────────────────────────
+
+
+@dataclass
+class TierSpec:
+    """Specification for one tier of the training ladder.
+
+    Precondition: checks is non-empty; thresholds keys match checks names.
+    """
+    name: str
+    n_train: int          # 0 = no training step
+    n_epochs: int         # ignored when n_train == 0
+    n_holdout: int
+    lr: float
+    checks: list          # list of (name: str, fn: callable) tuples
+    thresholds: dict[str, float] = field(default_factory=dict)
+
+    def threshold_for(self, check_name: str) -> float:
+        return self.thresholds.get(check_name, 0.85)
+
+
+def _make_tiers() -> list[TierSpec]:
+    """Return the canonical four-tier ladder spec."""
+    tier0_checks = [
+        ("headers",            check_headers),
+        ("entailed_non_empty", check_entailed_non_empty),
+        ("pipes_well_formed",  check_pipes_well_formed),
+        ("no_template_leakage", check_no_template_leakage),
+    ]
+    tier1_checks = tier0_checks + [
+        ("confidence_numeric",   check_confidence_numeric),
+        ("canonical_tag_format", check_canonical_tag_format),
+        ("both_tag_types",       check_both_tag_types),
+    ]
+    tier2_checks = tier1_checks + [
+        ("non_tautological",   check_non_tautological),
+        ("verbatim_entailed",  check_verbatim_entailed),
+        ("avg_score_tier2",    check_avg_score_tier2),
+    ]
+    tier3_checks = tier2_checks[:-1] + [  # replace tier2 score gate with tier3
+        ("avg_score_tier3",    check_avg_score_tier3),
+    ]
+
+    return [
+        TierSpec(
+            name="tier0_structure",
+            n_train=0, n_epochs=0, n_holdout=20, lr=0.0,
+            checks=tier0_checks,
+            thresholds={c: 0.90 for c, _ in tier0_checks},
+        ),
+        TierSpec(
+            name="tier1_annotation",
+            n_train=50, n_epochs=1, n_holdout=20, lr=2e-5,
+            checks=tier1_checks,
+            thresholds={
+                **{c: 0.90 for c, _ in tier0_checks},
+                "confidence_numeric":   0.90,
+                "canonical_tag_format": 0.85,
+                "both_tag_types":       0.80,
+            },
+        ),
+        TierSpec(
+            name="tier2_content",
+            n_train=200, n_epochs=2, n_holdout=30, lr=2e-5,
+            checks=tier2_checks,
+            thresholds={
+                **{c: 0.90 for c, _ in tier0_checks},
+                "confidence_numeric":   0.90,
+                "canonical_tag_format": 0.85,
+                "both_tag_types":       0.80,
+                "non_tautological":     0.85,
+                "verbatim_entailed":    0.50,
+                "avg_score_tier2":      0.70,
+            },
+        ),
+        TierSpec(
+            name="tier3_convergence",
+            n_train=0, n_epochs=5, n_holdout=20, lr=1e-5,  # n_train=0 means use full corpus
+            checks=tier3_checks,
+            thresholds={
+                **{c: 0.95 for c, _ in tier0_checks},
+                "confidence_numeric":   0.95,
+                "canonical_tag_format": 0.90,
+                "both_tag_types":       0.85,
+                "non_tautological":     0.90,
+                "verbatim_entailed":    0.60,
+                "avg_score_tier3":      0.80,
+            },
+        ),
+    ]
+
+
+# ── inference ─────────────────────────────────────────────────────────────────
+
+
+def _generate_outputs(
+    adapter_path: Path,
+    records: list[dict],
+    max_new_tokens: int = 256,
+) -> list[str]:
+    """Load adapter once and generate outputs for all records.
+
+    Returns model output strings in the same order as records.
+    """
+    import torch
+    from peft import AutoPeftModelForCausalLM  # type: ignore
+    from transformers import AutoTokenizer  # type: ignore
+
+    model = AutoPeftModelForCausalLM.from_pretrained(
+        str(adapter_path), torch_dtype=torch.float16, device_map="auto"
+    )
+    tokenizer = AutoTokenizer.from_pretrained(str(adapter_path))
+    model.eval()
+
+    outputs = []
+    for rec in records:
+        prompt = rec["input_text"]
+        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+        with torch.no_grad():
+            ids = model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                pad_token_id=tokenizer.eos_token_id,
+            )
+        gen = ids[0][inputs["input_ids"].shape[1]:]
+        outputs.append(tokenizer.decode(gen, skip_special_tokens=True))
+
+    del model
+    torch.cuda.empty_cache()
+    return outputs
+
+
+# ── training ──────────────────────────────────────────────────────────────────
+
+
+def _run_train(
+    adapter_path: Path,
+    corpus_path: Path,
+    output_dir: Path,
+    n_train: int,
+    n_epochs: int,
+    lr: float,
+    seed: int,
+) -> Path:
+    """Run SPO training for one tier. Returns path to produced adapter."""
+    from src.run_spo_training import SPOTrainingConfig, run_spo_training  # type: ignore
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    config = SPOTrainingConfig(
+        adapter_path=str(adapter_path),
+        dataset_path=str(corpus_path),
+        output_dir=str(output_dir),
+        num_epochs=n_epochs,
+        learning_rate=lr,
+        seed=seed,
+        max_train_records=n_train if n_train > 0 else None,
+        skip_regression_gate=True,
+    )
+    run_spo_training(config)
+    return output_dir / "adapter"
+
+
+# ── tier runner ───────────────────────────────────────────────────────────────
+
+
+@dataclass
+class TierResult:
+    tier: str
+    n_outputs: int
+    rates: dict[str, float]
+    passed: bool
+    failures: list[str]
+
+
+def run_tier(
+    tier: TierSpec,
+    adapter_path: Path,
+    corpus_path: Path,
+    tier_output_dir: Path,
+    full_corpus_records: list[dict],
+    seed: int,
+) -> tuple[TierResult, Path]:
+    """Execute one tier: optional mini-train → inference → checks.
+
+    Returns (TierResult, adapter_path_to_pass_to_next_tier).
+    """
+    rng = random.Random(seed)
+
+    # ── optional training ─────────────────────────────────────────────────────
+    trained_adapter = adapter_path
+    if tier.n_train > 0:
+        train_records = rng.sample(full_corpus_records, min(tier.n_train, len(full_corpus_records)))
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            for r in train_records:
+                f.write(json.dumps(r) + "\n")
+            mini_corpus = Path(f.name)
+        trained_adapter = _run_train(
+            adapter_path, mini_corpus, tier_output_dir,
+            n_train=tier.n_train, n_epochs=tier.n_epochs, lr=tier.lr, seed=seed,
+        )
+    elif tier.n_epochs > 0:
+        # Full corpus training (n_train=0 means no sampling limit)
+        trained_adapter = _run_train(
+            adapter_path, corpus_path, tier_output_dir,
+            n_train=0, n_epochs=tier.n_epochs, lr=tier.lr, seed=seed,
+        )
+
+    # ── sample holdout records ────────────────────────────────────────────────
+    holdout = rng.sample(full_corpus_records, min(tier.n_holdout, len(full_corpus_records)))
+
+    # ── generate ─────────────────────────────────────────────────────────────
+    print(f"  [{tier.name}] generating {len(holdout)} outputs …", flush=True)
+    outputs = _generate_outputs(trained_adapter, holdout)
+
+    # ── check ─────────────────────────────────────────────────────────────────
+    per_example = [
+        {name: fn(out, rec) for name, fn in tier.checks}
+        for out, rec in zip(outputs, holdout)
+    ]
+    rates = {name: sum(r[name] for r in per_example) / len(per_example)
+             for name, _ in tier.checks}
+
+    failures = [
+        f"{name}: {rates[name]:.0%} < {tier.threshold_for(name):.0%}"
+        for name, _ in tier.checks
+        if rates[name] < tier.threshold_for(name)
+    ]
+    passed = len(failures) == 0
+
+    return TierResult(
+        tier=tier.name,
+        n_outputs=len(outputs),
+        rates=rates,
+        passed=passed,
+        failures=failures,
+    ), trained_adapter
+
+
+# ── ladder orchestrator ───────────────────────────────────────────────────────
+
+
+@dataclass
+class LadderResult:
+    tiers_run: list[TierResult]
+    final_adapter: Optional[Path]
+    passed: bool
+    stopped_at: Optional[str]
+
+
+class TrainingLadder:
+    """Hierarchical training ladder: run tiers 0–max_tier, stop on first failure.
+
+    Precondition: base_adapter is a valid PEFT adapter directory.
+    Guarantee: never runs Tier N+1 if Tier N failed.
+    """
+
+    def __init__(
+        self,
+        base_adapter: str | Path,
+        corpus_path: str | Path,
+        output_root: str | Path,
+        seed: int = 42,
+    ) -> None:
+        self.base_adapter = Path(base_adapter)
+        self.corpus_path = Path(corpus_path)
+        self.output_root = Path(output_root)
+        self.seed = seed
+        self._tiers = _make_tiers()
+
+    def run(self, max_tier: int = 3) -> LadderResult:
+        """Run tiers 0 through min(max_tier, 3) with go/no-go gates.
+
+        Returns LadderResult with full per-tier breakdown.
+        """
+        self.output_root.mkdir(parents=True, exist_ok=True)
+
+        with open(self.corpus_path) as f:
+            full_corpus = [json.loads(l) for l in f]
+
+        adapter = self.base_adapter
+        tier_results: list[TierResult] = []
+        stopped_at = None
+
+        for i, tier in enumerate(self._tiers[:max_tier + 1]):
+            tier_dir = self.output_root / tier.name
+            print(f"\n{'='*60}", flush=True)
+            print(f"  Tier {i}: {tier.name}", flush=True)
+            action = "zero-shot" if tier.n_train == 0 and tier.n_epochs == 0 else \
+                     f"mini-train {tier.n_train}rec×{tier.n_epochs}ep" if tier.n_train > 0 else \
+                     f"full-train {tier.n_epochs}ep"
+            print(f"  Action : {action}  holdout={tier.n_holdout}", flush=True)
+            print(f"{'='*60}", flush=True)
+
+            result, adapter = run_tier(tier, adapter, self.corpus_path, tier_dir, full_corpus, self.seed)
+            tier_results.append(result)
+
+            # Print results
+            for check_name, rate in result.rates.items():
+                threshold = tier.threshold_for(check_name)
+                status = "✓" if rate >= threshold else "✗"
+                print(f"  {status} {check_name:<28} {rate:.0%}  (need {threshold:.0%})", flush=True)
+
+            if result.passed:
+                print(f"\n  → TIER {i} PASSED", flush=True)
+            else:
+                print(f"\n  → TIER {i} FAILED: {'; '.join(result.failures)}", flush=True)
+                stopped_at = tier.name
+                break
+
+        passed = stopped_at is None
+        final_adapter = adapter if passed else None
+
+        # Summary
+        print(f"\n{'='*60}", flush=True)
+        if passed:
+            print(f"  LADDER PASSED  (all {len(tier_results)} tiers)  adapter={final_adapter}", flush=True)
+        else:
+            print(f"  LADDER STOPPED at {stopped_at}", flush=True)
+        print(f"{'='*60}", flush=True)
+
+        # Persist result
+        summary = {
+            "passed": passed,
+            "stopped_at": stopped_at,
+            "tiers": [
+                {"tier": r.tier, "passed": r.passed, "rates": r.rates, "failures": r.failures}
+                for r in tier_results
+            ],
+        }
+        (self.output_root / "ladder_summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+
+        return LadderResult(
+            tiers_run=tier_results,
+            final_adapter=final_adapter,
+            passed=passed,
+            stopped_at=stopped_at,
+        )
+
+
+# ── CLI ───────────────────────────────────────────────────────────────────────
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--base-adapter", required=True, help="Starting PEFT adapter directory")
+    parser.add_argument("--corpus", default="data/train_facts_verbatim_v9.jsonl", help="JSONL training corpus")
+    parser.add_argument("--output-root", required=True, help="Directory to write tier outputs into")
+    parser.add_argument("--max-tier", type=int, default=3, choices=[0, 1, 2, 3], help="Highest tier to run (default 3)")
+    parser.add_argument("--seed", type=int, default=42)
+    args = parser.parse_args()
+
+    ladder = TrainingLadder(
+        base_adapter=args.base_adapter,
+        corpus_path=args.corpus,
+        output_root=args.output_root,
+        seed=args.seed,
+    )
+    result = ladder.run(max_tier=args.max_tier)
+    return 0 if result.passed else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

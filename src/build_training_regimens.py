@@ -79,9 +79,9 @@ Generate a response with:
 1. Non-Entailed Premises
 2. Entailed Premises
 
-Format each premise as: subject | relation (tag, confidence=X) | object
+Format each premise as: subject | (tag, confidence=N) | object
 - tag: "observed" for explicit facts, "inferred" for derived facts
-- confidence: 1.0 for observed, lower values for inferred facts
+- confidence: a decimal number, e.g. 1.0 for observed facts, 0.7 for inferred
 
 Response:"""
 

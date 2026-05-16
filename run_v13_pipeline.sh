@@ -46,8 +46,8 @@ echo ""
 echo "=== Step 3: Run training ladder (tier 3 only from v12d tier2 adapter) ==="
 $PYTHON -m src.training_ladder \
     --base-adapter "$BASE_ADAPTER" \
-    --data-path    "$FACTS_V13" \
-    --output-dir   "$OUTPUT_DIR" \
+    --corpus       "$FACTS_V13" \
+    --output-root  "$OUTPUT_DIR" \
     --start-tier   3
 
 echo ""

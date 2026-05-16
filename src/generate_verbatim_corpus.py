@@ -63,7 +63,9 @@ def build_prompt(quote: str) -> str:
         f'<subject> | <relation> (observed|inferred, confidence=X.X) | <object>\n\n'
         f'Throughline:\n'
         f'<one sentence conclusion>\n\n'
-        f'CRITICAL: In Entailed Premises, <subject> and <object> must be exact verbatim words/phrases from the quote — not paraphrased. Use | as separator.'
+        f'CRITICAL: In Entailed Premises, <subject>, <relation>, AND <object> must be exact verbatim words/phrases from the quote — not paraphrased. '
+        f'Invariant: strip all (...) from a triplet and the remaining S|P|O text must come directly from the quote. '
+        f'Use | as separator.'
     )
 
 
@@ -71,7 +73,8 @@ SYSTEM_PROMPT = (
     "You are a reasoning-extraction assistant. "
     "Given a quote, you extract implicit premises and a conclusion in a structured triplet format. "
     "Non-Entailed Premises use your own words. "
-    "Entailed Premises must use verbatim text from the quote as subject and object. "
+    "Entailed Premises must use verbatim text from the quote as subject, predicate (relation), and object. "
+    "Invariant: stripping all parenthetical content from an Entailed triplet must yield only verbatim words from the quote. "
     "Always output exactly three labelled sections."
 )
 

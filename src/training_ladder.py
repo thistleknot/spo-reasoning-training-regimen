@@ -153,7 +153,7 @@ def check_sections_distinct(output: str, _record: dict) -> bool:
     return set(ev) != set(nev)
 
 def check_verbatim_entailed(output: str, record: dict) -> bool:
-    """≥50% of Entailed triplet subject/object fields are verbatim spans from the quote."""
+    """≥50% of Entailed triplet S/P/O fields are verbatim spans from the quote."""
     quote = _extract_quote(record)
     if not quote:
         return True  # no quote available — can't penalise

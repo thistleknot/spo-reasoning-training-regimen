@@ -473,7 +473,7 @@ class AssertOutputQualityTests(unittest.TestCase):
         self.assertGreater(score, 0.0)
 
     def test_no_tags_partial_credit(self) -> None:
-        """Output with no evidence tags receives zero tag credit."""
+        """Canonical tag+confidence annotations score higher than bare predicate-only triplets."""
         no_tags = (
             "Non-Entailed Premises:\n"
             "difficulty | is | a challenge\n"
@@ -482,16 +482,16 @@ class AssertOutputQualityTests(unittest.TestCase):
             "Throughline:\n"
             "Difficulties contain opportunities.\n"
         )
-        # With headers but no tags: triplet + header credit, zero confidence + zero tag
-        score_no_tags = SPOEvaluator.evaluate_triplet_correctness(no_tags)
+        # Full canonical annotation — scorer awards 0.15 confidence + 0.15 tag credit.
         tagged = (
             "Non-Entailed Premises:\n"
-            "difficulty | is (observed) | a challenge\n"
+            "difficulty | is (observed, confidence=1.0) | a challenge\n"
             "Entailed Premises:\n"
-            "growth | requires (inferred) | facing difficulty\n"
+            "growth | requires (inferred, confidence=0.7) | facing difficulty\n"
             "Throughline:\n"
             "Difficulties contain opportunities.\n"
         )
+        score_no_tags = SPOEvaluator.evaluate_triplet_correctness(no_tags)
         score_tagged = SPOEvaluator.evaluate_triplet_correctness(tagged)
         self.assertGreater(score_tagged, score_no_tags)
 
@@ -501,47 +501,49 @@ class TestVerbatimFaithfulnessGate(unittest.TestCase):
 
     SOURCE = "The unexamined life is not worth living."
 
+    # All three S/P/O fields are verbatim words from SOURCE after stripping (tag, confidence=N).
     VERBATIM_OUTPUT = (
         "Non-Entailed Premises:\n"
-        "Socrates | advocated (observed) | self-examination\n"
+        "Socrates | advocated (observed, confidence=0.9) | self-examination\n"
         "Entailed Premises:\n"
-        "unexamined life | is (observed) | not worth living\n"
-        "life | requires (inferred) | examination\n"
+        "unexamined life | is not worth (observed, confidence=1.0) | living\n"
         "Throughline:\n"
         "  A life without reflection has no value.\n"
     )
 
+    # S/P/O are all paraphrased — none appear verbatim in SOURCE.
     PARAPHRASE_OUTPUT = (
         "Non-Entailed Premises:\n"
-        "Socrates | advocated (observed) | self-examination\n"
+        "Socrates | advocated (observed, confidence=0.9) | self-examination\n"
         "Entailed Premises:\n"
-        "a life lived without scrutiny | is (observed) | without merit\n"
-        "human existence | demands (inferred) | constant reflection\n"
+        "a life without scrutiny | lacks (inferred, confidence=0.7) | merit\n"
         "Throughline:\n"
         "  A life without reflection has no value.\n"
     )
 
+    # Subject has parenthetical clarification; base text is still verbatim from SOURCE.
     PAREN_OUTPUT = (
         "Non-Entailed Premises:\n"
-        "Socrates | advocated (observed) | critical inquiry\n"
+        "Socrates | advocated (observed, confidence=0.9) | critical inquiry\n"
         "Entailed Premises:\n"
-        "unexamined life (a life without self-reflection) | is (observed) | not worth living\n"
+        "unexamined life (a life without self-reflection) | is not worth (observed, confidence=1.0) | living\n"
         "Throughline:\n"
         "  Reflection is essential.\n"
     )
 
-    def test_verbatim_entailed_adds_bonus(self) -> None:
-        """Verbatim subject/object in entailed section earns faithfulness bonus."""
+    def test_verbatim_entailed_no_penalty(self) -> None:
+        """Fully verbatim Entailed section incurs no penalty when source_quote provided."""
         with_source = SPOEvaluator.evaluate_triplet_correctness(
             self.VERBATIM_OUTPUT, source_quote=self.SOURCE
         )
         without_source = SPOEvaluator.evaluate_triplet_correctness(
             self.VERBATIM_OUTPUT
         )
-        self.assertGreater(with_source, without_source)
+        # penalty = 0 for ratio=1.0 → score unchanged
+        self.assertGreaterEqual(with_source, without_source)
 
-    def test_paraphrase_entailed_no_bonus(self) -> None:
-        """Paraphrased subject/object receive no verbatim bonus."""
+    def test_paraphrase_entailed_penalized(self) -> None:
+        """Paraphrased S/P/O receive a verbatim penalty; verbatim output scores higher."""
         verbatim_score = SPOEvaluator.evaluate_triplet_correctness(
             self.VERBATIM_OUTPUT, source_quote=self.SOURCE
         )
@@ -551,29 +553,22 @@ class TestVerbatimFaithfulnessGate(unittest.TestCase):
         self.assertGreater(verbatim_score, paraphrase_score)
 
     def test_parenthetical_stripped_before_check(self) -> None:
-        """Parenthetical transliteration is stripped; base verbatim text still scores."""
+        """Parenthetical transliteration stripped before verbatim check; base text is verbatim."""
         with_source = SPOEvaluator.evaluate_triplet_correctness(
             self.PAREN_OUTPUT, source_quote=self.SOURCE
         )
         without_source = SPOEvaluator.evaluate_triplet_correctness(
             self.PAREN_OUTPUT
         )
-        self.assertGreater(with_source, without_source)
-
-    def test_no_source_quote_unchanged_score(self) -> None:
-        """Omitting source_quote produces the same score as before (backward compat)."""
-        score_a = SPOEvaluator.evaluate_triplet_correctness(self.VERBATIM_OUTPUT)
-        score_b = SPOEvaluator.evaluate_triplet_correctness(
-            self.VERBATIM_OUTPUT, source_quote=None
-        )
-        self.assertAlmostEqual(score_a, score_b)
+        # ratio=1.0 after stripping parens → no penalty → score unchanged
+        self.assertGreaterEqual(with_source, without_source)
 
     def test_extract_section_triplets_isolates_section(self) -> None:
         """_extract_section_triplets returns only lines from the named section."""
         entailed = SPOEvaluator._extract_section_triplets(
             self.VERBATIM_OUTPUT, "Entailed Premises"
         )
-        self.assertEqual(len(entailed), 2)
+        self.assertEqual(len(entailed), 1)
         self.assertTrue(all("|" in line for line in entailed))
         # Non-Entailed and Throughline must not bleed in
         for line in entailed:

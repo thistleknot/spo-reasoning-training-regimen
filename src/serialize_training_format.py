@@ -41,17 +41,18 @@ def _clean_field(field: str) -> str:
 
 
 def normalize_triplet(triplet: str) -> Optional[str]:
-    """Normalize a raw triplet string to canonical (tag, confidence=X) annotation format.
+    """Normalize a raw triplet string to canonical format: ``subject | predicate (tag, confidence=X) | object``.
 
     Preconditions:
         triplet is one line of a premise section.
     Postconditions:
-        Returns a normalized string ``subject | (tag, confidence=X) | object``
-        where tag is exactly 'observed' or 'inferred' and confidence is a float
-        in [0, 1], or None if the triplet is malformed/template/degenerate.
+        Returns a normalized string ``subject | predicate (tag, confidence=X) | object``
+        where predicate is verbatim text from the quote (Entailed Premises) or synthetic
+        (Non-Entailed Premises), tag is exactly 'observed' or 'inferred', and confidence
+        is a float in [0, 1].  Returns None if the triplet is malformed/template/degenerate.
     Failure modes:
         Returns None for template placeholders, lines without exactly 3 pipe-delimited
-        fields, or lines where any field is empty after cleaning.
+        fields, or lines where subject or object is empty after cleaning.
     """
     line = _BULLET_RE.sub('', triplet).strip()
 
@@ -157,7 +158,7 @@ def build_base_reasoning_prompt(quote: str) -> str:
     normalized_quote = normalize_quote_text(quote)
     return "\n".join(
         [
-            "Given this quote, extract the implicit reasoning.",
+            "Given this quote, extract the explicit and implicit reasoning facts.",
             "",
             f'Quote: "{normalized_quote}"',
             "",
@@ -166,15 +167,16 @@ def build_base_reasoning_prompt(quote: str) -> str:
             "2. Entailed Premises",
             "3. Throughline",
             "",
-            "Format each premise as: subject | (tag, confidence=N) | object",
+            "Format each premise as: subject | predicate (tag, confidence=N) | object",
             '- tag: "observed" for explicit facts, "inferred" for derived facts',
             "- confidence: a decimal number, e.g. 1.0 for observed facts, 0.7 for inferred",
             "",
             "VERBATIM EXTRACTION RULE (Entailed Premises only):",
-            "- Subject and object MUST be exact, verbatim text copied from the quote above.",
-            "- Do NOT paraphrase, summarize, or invent language for Entailed subject/object fields.",
-            "- If verbatim text needs clarification, add a parenthetical transliteration",
-            "  immediately after: verbatim text (clarification if needed)",
+            "- Subject, predicate, and object MUST be exact, verbatim text copied from the quote above.",
+            "- Do NOT paraphrase, summarize, or invent language for Entailed fields.",
+            "- Parenthetical clarifications may be added AFTER verbatim text: verbatim text (clarification)",
+            "- Invariant: strip all (...) from a triplet and the remaining text must be verbatim from the quote.",
+            '  Example: "Don\'t be | satisfied with (inferred, confidence=0.7) | stories"',
             '  Example: "unexamined life (a life without self-reflection) | lacks (observed, confidence=1.0) | worth"',
             "- Non-Entailed Premises and the Throughline may use your own words.",
             "",

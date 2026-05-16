@@ -495,13 +495,17 @@ class SPOEvaluator:
         entailed_triplet_lines: List[str],
         source_quote: str,
     ) -> float:
-        """Fraction of entailed triplet subject/object fields that are verbatim spans of source_quote.
+        """Fraction of entailed triplet S/P/O fields that are verbatim spans of source_quote.
 
-        For each triplet line, the subject (field 0) and object (field 2) are
-        extracted.  Parenthetical transliterations of the form ``term (clarification)``
-        are stripped so only the base term is checked against source_quote via
-        ``find_span()``.  A component counts as verbatim when ``find_span`` returns
-        a non-None span (coverage ≥ 0.5 match, per span_extractor contract).
+        For each triplet line all three fields are checked:
+          - Field 0 (subject): strip trailing ``(clarification)`` parenthetical
+          - Field 1 (predicate): strip trailing ``(tag, confidence=N)`` annotation;
+            only checked when non-empty text remains after stripping — bare-tag lines
+            such as ``(observed, confidence=1.0)`` contribute nothing to the count
+          - Field 2 (object): strip trailing ``(clarification)`` parenthetical
+
+        A component counts as verbatim when ``find_span`` returns a non-None span
+        (coverage ≥ 0.5 match, per span_extractor contract).
 
         Require:
             entailed_triplet_lines is a list of '|'-delimited triplet strings.
@@ -511,17 +515,23 @@ class SPOEvaluator:
             or source_quote is blank.  Returns 1.0 when all checked components
             are verbatim.
         Failure modes:
-            Single-token subjects/objects that happen to be common English words
-            may match spuriously.  This is acceptable — false positives are benign
-            (over-reward is bounded by the 0.05 weight).
+            Single-token terms that happen to be common English words may match
+            spuriously — false positives are benign (over-reward bounded by 0.05
+            weight on the caller side).
         """
         if not entailed_triplet_lines or not source_quote.strip():
             return 0.0
 
+        # Strips a trailing (anything) annotation from a field.
         _paren_re = re.compile(r"\s*\(.*?\)\s*$")
+        # Detects a bare-tag predicate: "(observed|inferred, confidence=N)" with no prefix text.
+        _bare_tag_re = re.compile(
+            r"^\s*\((observed|inferred)[^)]*confidence\s*=\s*[0-9.]+[^)]*\)\s*$",
+            re.IGNORECASE,
+        )
 
         def _base_text(field: str) -> str:
-            """Strip parenthetical transliteration and surrounding whitespace."""
+            """Strip parenthetical annotation and surrounding whitespace."""
             return _paren_re.sub("", field).strip()
 
         checked = 0
@@ -530,14 +540,24 @@ class SPOEvaluator:
             parts = line.split("|")
             if len(parts) < 3:
                 continue
-            for field_idx in (0, 2):  # subject and object only
-                raw = parts[field_idx]
-                base = _base_text(raw)
+            subject_base = _base_text(parts[0])
+            predicate_raw = parts[1]
+            object_base = _base_text(parts[2])
+
+            for base in (subject_base, object_base):
                 if not base:
                     continue
                 checked += 1
                 if find_span(source_quote, base) is not None:
                     verbatim += 1
+
+            # Predicate: only check when there is actual text beyond the tag annotation.
+            if not _bare_tag_re.match(predicate_raw):
+                pred_base = _base_text(predicate_raw)
+                if pred_base:
+                    checked += 1
+                    if find_span(source_quote, pred_base) is not None:
+                        verbatim += 1
 
         return verbatim / checked if checked > 0 else 0.0
 

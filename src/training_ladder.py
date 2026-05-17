@@ -543,10 +543,11 @@ def _make_tiers() -> list[TierSpec]:
         ),
         TierSpec(
             name="tier4_facts_confidence",
-            n_train=200, n_epochs=3, n_holdout=50, lr=2e-5,
+            n_train=200, n_epochs=5, n_holdout=50, lr=2e-5,
             max_new_tokens=512,
             checks=tier4_checks,
-            # 200×3ep is enough to convert tag-only annotations to (tag, confidence=N).
+            # 5 epochs (1000 gradient steps) needed to overcome tier3 prior (1057×5 = 5285 steps).
+            # 3 epochs was insufficient: entailed_non_empty reached 42% vs 75% needed.
             # check_facts_headers validates the 2 factual-section headers (no Throughline).
             # check_canonical_tag_format threshold is conservative (0.65) because the model
             # may hedge with tag-only output during the first epoch before fully committing.

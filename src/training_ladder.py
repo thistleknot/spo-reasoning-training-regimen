@@ -262,8 +262,25 @@ def _extract_entailed_block_lines(output: str) -> list[str]:
     return result
 
 
-def check_transliteration_present(output: str, _record: dict) -> bool:
-    """At least one transliteration line (a paren-wrapped S|P|O) appears in the Entailed section."""
+def _record_has_transliteration(record: dict) -> bool:
+    """True when the record's expected output_text contains at least one transliteration line."""
+    for line in _extract_entailed_block_lines(record.get("output_text", "")):
+        if _TRANSLIT_RE.match(line):
+            return True
+    return False
+
+
+def check_transliteration_present(output: str, record: dict) -> bool | None:
+    """Recall check: for records whose *expected* output contains transliteration lines,
+    verify the model also produces at least one.
+
+    Returns None (N/A) for records with no transliteration in their expected output so
+    only transliteration-eligible records contribute to the pass rate.  This avoids
+    diluting the score with the majority of plain-English records that should not produce
+    transliteration at all.
+    """
+    if not _record_has_transliteration(record):
+        return None  # N/A — plain-English record; skip denominator
     for line in _extract_entailed_block_lines(output):
         if _TRANSLIT_RE.match(line):
             return True
@@ -429,9 +446,11 @@ def _make_tiers() -> list[TierSpec]:
                 "clean_tag_format":          0.70,  # (observed)/(inferred) without confidence
                 "sections_distinct":         0.90,
                 "verbatim_entailed":         0.55,
-                # Training corpus has ~85% transliteration coverage after stratified
-                # sampling; model should produce at least 10% at inference time.
-                "transliteration_present":   0.10,
+                # Conditional recall: only transliteration-eligible holdout records
+                # contribute (records with no expected tl return None / N-A).
+                # After stratified holdout split, ~8 tl records are guaranteed in
+                # the 50-record holdout; model should recall at least half of them.
+                "transliteration_present":   0.50,
                 "transliteration_format":    0.40,
                 # avg_score_tier3 removed: SPOEvaluator requires confidence=N.N which
                 # base_reasoning strips by design; scorer max is ~0.50 with tag-only output.
@@ -653,28 +672,38 @@ def run_tier(
     """
     rng = random.Random(seed)
 
+    # ── stratified train/holdout split ────────────────────────────────────────
+    # Partition by transliteration presence so both training AND holdout get tl
+    # representation. Without stratification, all tl records are consumed by
+    # training (take_tl = min(173, 200) = 173) and holdout gets ~0 by chance.
+    with_tl = [r for r in full_corpus_records if _record_has_transliteration(r)]
+    without_tl = [r for r in full_corpus_records if not _record_has_transliteration(r)]
+
+    # Reserve a proportional share of tl records for holdout.
+    n_total = max(len(full_corpus_records), 1)
+    n_tl_holdout = max(5, len(with_tl) * tier.n_holdout // n_total)
+    n_tl_holdout = min(n_tl_holdout, len(with_tl))
+
+    rng.shuffle(with_tl)
+    tl_holdout_pool = with_tl[:n_tl_holdout]
+    tl_train_pool = with_tl[n_tl_holdout:]
+
+    n_plain_holdout = max(0, tier.n_holdout - len(tl_holdout_pool))
+    plain_holdout = rng.sample(without_tl, min(n_plain_holdout, len(without_tl)))
+    holdout: list[dict] = tl_holdout_pool + plain_holdout
+    rng.shuffle(holdout)
+
     # ── optional training ─────────────────────────────────────────────────────
     trained_adapter = adapter_path
     if tier.n_train > 0:
-        # Stratified sampling: prioritise records that contain transliteration
-        # lines so the model sees adequate transliteration signal even with a
-        # small n_train cap.  A transliteration line starts with "(" and ends
-        # with ")" and contains at least two "|" separators (handles nested
-        # annotation parens like "(S | has (inferred) | O)").
-        def _has_transliteration(rec: dict) -> bool:
-            for line in rec.get("output_text", "").splitlines():
-                s = line.strip()
-                if s.startswith("(") and s.endswith(")") and s.count("|") >= 2:
-                    return True
-            return False
-
-        with_tl = [r for r in full_corpus_records if _has_transliteration(r)]
-        without_tl = [r for r in full_corpus_records if not _has_transliteration(r)]
-        n = min(tier.n_train, len(full_corpus_records))
-        take_tl = min(len(with_tl), n)
+        # Training pool: remaining tl records + plain records not in holdout.
+        plain_holdout_ids = {id(r) for r in plain_holdout}
+        plain_train_pool = [r for r in without_tl if id(r) not in plain_holdout_ids]
+        n = min(tier.n_train, len(full_corpus_records) - len(holdout))
+        take_tl = min(len(tl_train_pool), n)
         take_plain = n - take_tl
-        sampled_tl = rng.sample(with_tl, take_tl)
-        sampled_plain = rng.sample(without_tl, min(take_plain, len(without_tl)))
+        sampled_tl = rng.sample(tl_train_pool, take_tl)
+        sampled_plain = rng.sample(plain_train_pool, min(take_plain, len(plain_train_pool)))
         train_records = sampled_tl + sampled_plain
         rng.shuffle(train_records)
         with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
@@ -693,9 +722,6 @@ def run_tier(
             n_train=0, n_epochs=tier.n_epochs, lr=tier.lr, seed=seed,
         )
 
-    # ── sample holdout records ────────────────────────────────────────────────
-    holdout = rng.sample(full_corpus_records, min(tier.n_holdout, len(full_corpus_records)))
-
     # ── generate ─────────────────────────────────────────────────────────────
     print(f"  [{tier.name}] generating {len(holdout)} outputs …", flush=True)
     outputs = _generate_outputs(trained_adapter, holdout, max_new_tokens=tier.max_new_tokens)
@@ -705,8 +731,11 @@ def run_tier(
         {name: fn(out, rec) for name, fn in tier.checks}
         for out, rec in zip(outputs, holdout)
     ]
-    rates = {name: sum(r[name] for r in per_example) / len(per_example)
-             for name, _ in tier.checks}
+    # None means N/A (check not applicable for this record); exclude from denominator.
+    rates = {}
+    for name, _ in tier.checks:
+        eligible = [r[name] for r in per_example if r[name] is not None]
+        rates[name] = sum(eligible) / len(eligible) if eligible else 1.0
 
     failures = [
         f"{name}: {rates[name]:.0%} < {tier.threshold_for(name):.0%}"

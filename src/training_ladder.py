@@ -311,6 +311,60 @@ def check_transliteration_format(output: str, _record: dict) -> bool:
     return True
 
 
+# ── regimen checks (facts_with_confidence / syllogism_with_confidence) ─────────
+
+
+def check_facts_headers(output: str, _record: dict) -> bool:
+    """Both facts-regimen headers present: 'Non-Entailed Premises:' and 'Entailed Premises:'.
+
+    facts_with_confidence outputs do not include a Throughline section, so
+    check_headers (which requires all 3 canonical headers) would always fail.
+    This check validates the two factual-section headers only.
+    """
+    lines = {l.strip() for l in output.splitlines() if l.strip().endswith(":") and "|" not in l}
+    return "Non-Entailed Premises:" in lines and "Entailed Premises:" in lines
+
+
+def check_throughline_present(output: str, _record: dict) -> bool:
+    """syllogism_with_confidence output contains 'Throughline:' with non-empty content.
+
+    Checks that the Throughline header exists and the very next non-blank line
+    has at least 10 characters (not a stub or template placeholder).
+    """
+    lines = output.splitlines()
+    for i, line in enumerate(lines):
+        if line.strip() == "Throughline:":
+            for j in range(i + 1, min(i + 4, len(lines))):
+                content = lines[j].strip()
+                if content and len(content) >= 10:
+                    return True
+    return False
+
+
+def check_syllogism_confidence_present(output: str, _record: dict) -> bool:
+    """syllogism_with_confidence output contains 'Confidence:' followed by a valid float.
+
+    The expected format is:
+        Confidence:
+          0.85
+    Checks that the header exists and the next non-blank line is a parseable
+    float in [0.0, 1.0].
+    """
+    lines = output.splitlines()
+    for i, line in enumerate(lines):
+        if line.strip() == "Confidence:":
+            for j in range(i + 1, min(i + 4, len(lines))):
+                content = lines[j].strip()
+                if not content:
+                    continue
+                try:
+                    val = float(content)
+                    return 0.0 <= val <= 1.0
+                except ValueError:
+                    pass
+    return False
+
+
 # ── tier definitions ──────────────────────────────────────────────────────────
 
 
@@ -328,6 +382,7 @@ class TierSpec:
     max_new_tokens: int   # generation budget; use fewer tokens for structure-only tiers
     checks: list          # list of (name: str, fn: callable) tuples
     thresholds: dict[str, float] = field(default_factory=dict)
+    corpus_override: Optional[Path] = None  # per-tier corpus; overrides LadderRunner.corpus_path
 
     def threshold_for(self, check_name: str) -> float:
         return self.thresholds.get(check_name, 0.85)
@@ -390,6 +445,28 @@ def _make_tiers() -> list[TierSpec]:
     tier3_checks = tier2_checks[:-1] + [  # drop tier2 score gate; tier3 has its own
         ("clean_tag_format",          check_clean_tag_format),
         ("transliteration_format",    check_transliteration_format),
+    ]
+
+    # Tier 4: facts_with_confidence regimen.
+    # Teaches the model to produce (tag, confidence=N) annotations on top of the
+    # tag-only base the previous three tiers established.  Uses a separate corpus
+    # (confidence-bearing serialization of the same structured records).
+    # check_headers is intentionally absent: facts_with_confidence has no Throughline
+    # section, so the 3-header gate would always fail (2/3 = 0.67 < required 1.0).
+    tier4_checks = [
+        ("facts_headers",           check_facts_headers),
+        ("pipes_well_formed",       check_pipes_well_formed),
+        ("entailed_non_empty",      check_entailed_non_empty),
+        ("confidence_numeric",      check_confidence_numeric),
+        ("canonical_tag_format",    check_canonical_tag_format),
+    ]
+
+    # Tier 5: syllogism_with_confidence regimen.
+    # Takes extracted facts as input and produces a throughline + confidence score.
+    # Corpus is a separate serialization (give-me-the-throughline prompt format).
+    tier5_checks = [
+        ("throughline_present",           check_throughline_present),
+        ("syllogism_confidence_present",  check_syllogism_confidence_present),
     ]
 
     return [
@@ -463,6 +540,36 @@ def _make_tiers() -> list[TierSpec]:
                 # avg_score_tier3 removed: SPOEvaluator requires confidence=N.N which
                 # base_reasoning strips by design; scorer max is ~0.50 with tag-only output.
             },
+        ),
+        TierSpec(
+            name="tier4_facts_confidence",
+            n_train=200, n_epochs=3, n_holdout=50, lr=2e-5,
+            max_new_tokens=512,
+            checks=tier4_checks,
+            # 200×3ep is enough to convert tag-only annotations to (tag, confidence=N).
+            # check_facts_headers validates the 2 factual-section headers (no Throughline).
+            # check_canonical_tag_format threshold is conservative (0.65) because the model
+            # may hedge with tag-only output during the first epoch before fully committing.
+            thresholds={
+                "facts_headers":           0.80,
+                "pipes_well_formed":       0.85,
+                "entailed_non_empty":      0.75,
+                "confidence_numeric":      0.70,
+                "canonical_tag_format":    0.65,
+            },
+            corpus_override=Path("data/train_facts_with_confidence_verbatim_v19.jsonl"),
+        ),
+        TierSpec(
+            name="tier5_syllogism",
+            n_train=200, n_epochs=3, n_holdout=50, lr=2e-5,
+            max_new_tokens=256,  # throughline + confidence is short
+            checks=tier5_checks,
+            # 200×3ep for a short conditional generation task (given facts → score).
+            thresholds={
+                "throughline_present":           0.80,
+                "syllogism_confidence_present":  0.75,
+            },
+            corpus_override=Path("data/train_syllogism_with_confidence_verbatim_v19.jsonl"),
         ),
     ]
 
@@ -812,18 +919,22 @@ class TrainingLadder:
         self._tiers = _make_tiers()
 
     def run(self, max_tier: int = 3, start_tier: int = 0) -> LadderResult:
-        """Run tiers start_tier through min(max_tier, 3) with go/no-go gates.
+        """Run tiers start_tier through min(max_tier, 5) with go/no-go gates.
 
         When start_tier > 0, base_adapter is used directly as the starting
         adapter for that tier (tiers 0..start_tier-1 are skipped and not
         recorded in the result).
+
+        Tiers 4–5 use their own corpus_override path (regimen-specific serialization).
+        For these tiers the active corpus is loaded fresh from corpus_override so the
+        holdout records match the regimen format.
 
         Returns LadderResult with full per-tier breakdown.
         """
         self.output_root.mkdir(parents=True, exist_ok=True)
 
         with open(self.corpus_path) as f:
-            full_corpus = [json.loads(l) for l in f]
+            default_full_corpus = [json.loads(l) for l in f]
 
         adapter = self.base_adapter
         tier_results: list[TierResult] = []
@@ -842,7 +953,15 @@ class TrainingLadder:
             print(f"  Action : {action}  holdout={tier.n_holdout}", flush=True)
             print(f"{'='*60}", flush=True)
 
-            result, adapter = run_tier(tier, adapter, self.corpus_path, tier_dir, full_corpus, self.seed)
+            if tier.corpus_override is not None:
+                tier_corpus_path = tier.corpus_override
+                with open(tier_corpus_path) as f:
+                    tier_full_corpus = [json.loads(l) for l in f]
+            else:
+                tier_corpus_path = self.corpus_path
+                tier_full_corpus = default_full_corpus
+
+            result, adapter = run_tier(tier, adapter, tier_corpus_path, tier_dir, tier_full_corpus, self.seed)
             tier_results.append(result)
 
             # Print results
@@ -898,8 +1017,8 @@ def main() -> int:
     parser.add_argument("--base-adapter", required=True, help="Starting PEFT adapter directory")
     parser.add_argument("--corpus", default="data/train_facts_verbatim_v9.jsonl", help="JSONL training corpus")
     parser.add_argument("--output-root", required=True, help="Directory to write tier outputs into")
-    parser.add_argument("--max-tier", type=int, default=3, choices=[0, 1, 2, 3], help="Highest tier to run (default 3)")
-    parser.add_argument("--start-tier", type=int, default=0, choices=[0, 1, 2, 3], help="First tier to run (default 0); use with --base-adapter pointing at a prior tier's output adapter")
+    parser.add_argument("--max-tier", type=int, default=3, choices=[0, 1, 2, 3, 4, 5], help="Highest tier to run (default 3)")
+    parser.add_argument("--start-tier", type=int, default=0, choices=[0, 1, 2, 3, 4, 5], help="First tier to run (default 0); use with --base-adapter pointing at a prior tier's output adapter")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 

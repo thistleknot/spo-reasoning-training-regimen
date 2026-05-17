@@ -102,13 +102,22 @@ Response:"""
 
 
 def aggregate_syllogism_confidence(entailed_premises: Optional[list[str]]) -> Optional[float]:
-    """Compute a deterministic syllogism confidence from entailed premise scores."""
+    """Compute a deterministic syllogism confidence from entailed premise scores.
+
+    Normalises each premise before extracting the confidence value so that
+    triplets that lack explicit confidence annotations receive the tag-appropriate
+    default (observed→1.0, inferred→0.7) rather than contributing None.
+    """
     if not entailed_premises:
         return None
 
+    from src.serialize_training_format import normalize_triplet
+
+    normalized = [normalize_triplet(t) for t in entailed_premises]
     confidences = [
-        extract_triplet_confidence(triplet)
-        for triplet in entailed_premises
+        extract_triplet_confidence(n)
+        for n in normalized
+        if n is not None
     ]
     confidences = [value for value in confidences if value is not None]
     if not confidences:

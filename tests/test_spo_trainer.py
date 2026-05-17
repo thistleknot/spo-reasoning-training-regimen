@@ -718,6 +718,96 @@ class TestTrainingLadderCheckFunctions(unittest.TestCase):
         self.assertTrue(self.tags_excl(output, {}))
 
 
+class TestRegimenChecks(unittest.TestCase):
+    """Unit tests for the regimen-specific check functions added in tier4/tier5.
+
+    check_facts_headers     — detects Non-Entailed + Entailed headers
+    check_throughline_present  — detects Throughline: with non-stub content
+    check_syllogism_confidence_present — detects Confidence: with a float
+    """
+
+    def setUp(self) -> None:
+        from src.training_ladder import (
+            check_facts_headers,
+            check_throughline_present,
+            check_syllogism_confidence_present,
+        )
+        self.facts_headers = check_facts_headers
+        self.throughline = check_throughline_present
+        self.syl_conf = check_syllogism_confidence_present
+
+    # ── check_facts_headers ──────────────────────────────────────────────────
+
+    def test_facts_headers_both_present(self) -> None:
+        output = "Non-Entailed Premises:\nS | P | O\n\nEntailed Premises:\nA | B | C"
+        self.assertTrue(self.facts_headers(output, {}))
+
+    def test_facts_headers_missing_entailed(self) -> None:
+        output = "Non-Entailed Premises:\nS | P | O"
+        self.assertFalse(self.facts_headers(output, {}))
+
+    def test_facts_headers_missing_non_entailed(self) -> None:
+        output = "Entailed Premises:\nA | B | C"
+        self.assertFalse(self.facts_headers(output, {}))
+
+    def test_facts_headers_empty_output(self) -> None:
+        self.assertFalse(self.facts_headers("", {}))
+
+    def test_facts_headers_only_throughline_fails(self) -> None:
+        """Throughline-only output (syllogism format) must not pass facts check."""
+        output = "Throughline:\n  Some text here.\n\nConfidence:\n  0.85"
+        self.assertFalse(self.facts_headers(output, {}))
+
+    # ── check_throughline_present ────────────────────────────────────────────
+
+    def test_throughline_present_with_content(self) -> None:
+        output = "Throughline:\n  One should embrace their unique identity."
+        self.assertTrue(self.throughline(output, {}))
+
+    def test_throughline_present_indented_content(self) -> None:
+        output = "Throughline:\n    The core argument is that authenticity matters."
+        self.assertTrue(self.throughline(output, {}))
+
+    def test_throughline_absent(self) -> None:
+        output = "Non-Entailed Premises:\nS | P | O"
+        self.assertFalse(self.throughline(output, {}))
+
+    def test_throughline_stub_too_short(self) -> None:
+        """A Throughline: header with only whitespace or a very short stub must fail."""
+        output = "Throughline:\n  N/A"
+        self.assertFalse(self.throughline(output, {}))
+
+    def test_throughline_header_with_no_content_line(self) -> None:
+        output = "Throughline:"
+        self.assertFalse(self.throughline(output, {}))
+
+    # ── check_syllogism_confidence_present ───────────────────────────────────
+
+    def test_syllogism_confidence_valid_float(self) -> None:
+        output = "Throughline:\n  Something.\n\nConfidence:\n  0.85"
+        self.assertTrue(self.syl_conf(output, {}))
+
+    def test_syllogism_confidence_one_zero(self) -> None:
+        output = "Confidence:\n  1.0"
+        self.assertTrue(self.syl_conf(output, {}))
+
+    def test_syllogism_confidence_zero(self) -> None:
+        output = "Confidence:\n  0.0"
+        self.assertTrue(self.syl_conf(output, {}))
+
+    def test_syllogism_confidence_out_of_range(self) -> None:
+        output = "Confidence:\n  1.5"
+        self.assertFalse(self.syl_conf(output, {}))
+
+    def test_syllogism_confidence_non_numeric(self) -> None:
+        output = "Confidence:\n  N/A"
+        self.assertFalse(self.syl_conf(output, {}))
+
+    def test_syllogism_confidence_absent(self) -> None:
+        output = "Throughline:\n  Some text."
+        self.assertFalse(self.syl_conf(output, {}))
+
+
 if __name__ == "__main__":
     unittest.main()
 

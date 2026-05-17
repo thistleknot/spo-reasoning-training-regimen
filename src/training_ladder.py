@@ -380,9 +380,8 @@ def _make_tiers() -> list[TierSpec]:
             max_new_tokens=512,
             checks=tier2_checks,
             # 200×2ep sufficient for content quality + section structure, but NOT for
-            # confidence format — confidence=<0.7> habit requires full corpus to overwrite.
-            # v11 empirical: verbatim_entailed=93%, avg_score=87%, but confidence_numeric=40%.
-            # Format checks deferred to tier3 where 1089×5ep drives them to target.
+            # confidence format — confidence=<0.7> habit requires more gradient steps.
+            # Format checks deferred to tier3 where 200×5ep drives them to target.
             thresholds={
                 **{c: 0.85 for c, _ in tier0_checks},
                 "headers":              0.80,  # 30-sample holdout noise; tier3 enforces 0.90
@@ -394,10 +393,12 @@ def _make_tiers() -> list[TierSpec]:
         ),
         TierSpec(
             name="tier3_convergence",
-            n_train=0, n_epochs=5, n_holdout=20, lr=2e-5,
+            n_train=200, n_epochs=5, n_holdout=50, lr=2e-5,
             max_new_tokens=512,
             checks=tier3_checks,
-            # Full training: structure near-ceiling, annotation mostly canonical.
+            # 200-record cap: if the format isn't learnable from 200 examples the data
+            # or prompt is the problem, not the sample size.  5 epochs on 200 records
+            # gives ~1000 gradient steps — sufficient for convergence without a 2h run.
             # v12c empirical baselines after extended normalization:
             #   entailed_non_empty:    65-75% (some outputs have empty/inline entailed)
             #   confidence_numeric:    75-90% after normalising <X>, -X, inferred,conf=X
@@ -648,7 +649,8 @@ def run_tier(
             n_train=tier.n_train, n_epochs=tier.n_epochs, lr=tier.lr, seed=seed,
         )
     elif tier.n_epochs > 0:
-        # Full corpus training (n_train=0 means no sampling limit)
+        # n_train=0 with epochs>0: use full corpus (available for external callers;
+        # no built-in tier uses this path — all tiers now have explicit n_train caps).
         trained_adapter = _run_train(
             adapter_path, corpus_path, tier_output_dir,
             n_train=0, n_epochs=tier.n_epochs, lr=tier.lr, seed=seed,

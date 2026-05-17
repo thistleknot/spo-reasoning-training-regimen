@@ -374,7 +374,14 @@ def _make_tiers() -> list[TierSpec]:
         ("verbatim_entailed",    check_verbatim_entailed),
         ("avg_score_tier2",      check_avg_score_tier2),
     ]
-    # Tier 3 adds tag format convergence and transliteration checks.
+    # Tier 3 adds tag format convergence.
+    # transliteration_present removed: the feature is teacher-LLM noise, not a
+    # learnable signal.  Only 13/173 "tl" records in the training corpus have
+    # non-English input; the rest are English quotes where the teacher added
+    # random paraphrase lines with no consistent input trigger.  103 unique tl
+    # lines across 173 records confirms these are not a systematic pattern.
+    # transliteration_format is retained as a soft format-only check (it is
+    # vacuously True when no tl lines are present, so it does not block the tier).
     # confidence_numeric / canonical_tag_format removed: base_reasoning training
     # strips confidence by design — a judge assigns it independently post-training.
     # avg_score_tier3 also removed: SPOEvaluator.evaluate_triplet_correctness awards
@@ -382,7 +389,6 @@ def _make_tiers() -> list[TierSpec]:
     # which are absent by design (max reachable score ~0.50 < any meaningful gate).
     tier3_checks = tier2_checks[:-1] + [  # drop tier2 score gate; tier3 has its own
         ("clean_tag_format",          check_clean_tag_format),
-        ("transliteration_present",   check_transliteration_present),
         ("transliteration_format",    check_transliteration_format),
     ]
 
@@ -438,10 +444,10 @@ def _make_tiers() -> list[TierSpec]:
             # now strips confidence by design so a judge can assign it independently.
             # clean_tag_format replaces them: checks that (observed)/(inferred) tags
             # appear without confidence numbers.
-            # v12c empirical baselines (pre-strip):
-            #   entailed_non_empty:    65-75%
-            #   avg_score (>= 0.65):   55-65%
-            #   transliteration_present: only 16% of records — threshold kept low
+            # transliteration_present removed: teacher-LLM artifact (only 13/173 tl
+            # records have non-English input; not a learnable conditional feature).
+            # avg_score_tier3 removed: SPOEvaluator requires confidence=N.N which
+            # base_reasoning strips by design; scorer max is ~0.50 with tag-only output.
             thresholds={
                 **{c: 0.90 for c, _ in tier0_checks},
                 "headers":                   0.85,
@@ -450,11 +456,9 @@ def _make_tiers() -> list[TierSpec]:
                 "clean_tag_format":          0.70,  # (observed)/(inferred) without confidence
                 "sections_distinct":         0.90,
                 "verbatim_entailed":         0.55,
-                # Conditional recall: only transliteration-eligible holdout records
-                # contribute (records with no expected tl return None / N-A).
-                # After stratified holdout split, ~8 tl records are guaranteed in
-                # the 50-record holdout; model should recall at least half of them.
-                "transliteration_present":   0.50,
+                # transliteration_format: vacuously True when model produces no tl lines,
+                # which is correct for the 160/173 English "tl" records.  When tl lines
+                # are produced, this ensures (tag) format without confidence numbers.
                 "transliteration_format":    0.40,
                 # avg_score_tier3 removed: SPOEvaluator requires confidence=N.N which
                 # base_reasoning strips by design; scorer max is ~0.50 with tag-only output.

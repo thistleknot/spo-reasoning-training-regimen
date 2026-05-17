@@ -159,10 +159,22 @@ def check_canonical_tag_format(output: str, _record: dict) -> bool:
 
     Applies _normalize_confidence_syntax() first so confidence=<0.7> counts as
     canonical (the value is correct; only the delimiter is wrong).
+    Used by facts_with_confidence / syllogism_with_confidence regimens only.
     """
     output = _normalize_confidence_syntax(output)
     tag_re = re.compile(r"\(\s*(observed|inferred)\s*,\s*confidence\s*=\s*[0-9]", re.IGNORECASE)
     return bool(tag_re.search(output))
+
+
+def check_clean_tag_format(output: str, _record: dict) -> bool:
+    """At least one triplet uses the base-regimen tag-only annotation (observed) or (inferred).
+
+    Base-reasoning training strips confidence scores so a judge can assign them
+    independently.  This gate verifies the model learned that clean format —
+    not that it retained the old (tag, confidence=N) shape.
+    """
+    tag_only_re = re.compile(r"\(\s*(observed|inferred)\s*\)", re.IGNORECASE)
+    return bool(tag_only_re.search(output))
 
 def check_tags_exclusive(output: str, _record: dict) -> bool:
     """No single triplet line carries both 'observed' and 'inferred' as annotation tags.
@@ -259,21 +271,21 @@ def check_transliteration_present(output: str, _record: dict) -> bool:
 
 
 def check_transliteration_format(output: str, _record: dict) -> bool:
-    """All transliteration lines that ARE present match (S | P (tag, conf=N) | O) format.
+    """All transliteration lines that ARE present use (S | P (tag) | O) format.
 
-    Only checks lines that look like transliterations (start+end with parens and
-    contain exactly 2 pipes).  Returns True when no transliteration lines exist
-    (format vacuously satisfied) so early tiers are not penalised.
+    Accepts both tag-only ``(observed)`` and confidence-bearing
+    ``(observed, confidence=N)`` annotations — the base-regimen strips
+    confidence at serialization time, so either shape is valid at inference.
+    Returns True vacuously when no transliteration lines are present so early
+    tiers are not penalised.
     """
-    tag_conf_re = re.compile(
-        r"\(\s*(observed|inferred)\s*,\s*confidence\s*=\s*[0-9]", re.IGNORECASE
-    )
+    tag_re = re.compile(r"\(\s*(observed|inferred)\s*[,)]", re.IGNORECASE)
     for line in _extract_entailed_block_lines(output):
         m = _TRANSLIT_RE.match(line)
         if not m:
             continue
         predicate_field = m.group(2)
-        if not tag_conf_re.search(predicate_field):
+        if not tag_re.search(predicate_field):
             return False
     return True
 
@@ -334,18 +346,18 @@ def _make_tiers() -> list[TierSpec]:
         ("tags_exclusive", check_tags_exclusive),
     ]
     # Tier 2 gate: content quality + section structure.
-    # confidence_numeric and canonical_tag_format are deferred to tier3 — the
-    # confidence=<0.7> artifact requires full corpus (1000+×5ep) to overwrite; 200×2ep
-    # consistently measures ~30-40% on these even when verbatim and score are excellent.
+    # clean_tag_format and transliteration checks deferred to tier3 — 200×2ep
+    # consistently measures only ~30-40% on tag format even when verbatim/score are good.
     tier2_checks = tier1_checks + [
         ("sections_distinct",    check_sections_distinct),
         ("verbatim_entailed",    check_verbatim_entailed),
         ("avg_score_tier2",      check_avg_score_tier2),
     ]
-    # Tier 3 adds format convergence checks on top of tier2 content checks.
+    # Tier 3 adds tag format convergence and transliteration checks.
+    # confidence_numeric / canonical_tag_format removed: base_reasoning training
+    # strips confidence by design — a judge assigns it independently post-training.
     tier3_checks = tier2_checks[:-1] + [  # swap tier2 score gate for tier3
-        ("confidence_numeric",        check_confidence_numeric),
-        ("canonical_tag_format",      check_canonical_tag_format),
+        ("clean_tag_format",          check_clean_tag_format),
         ("transliteration_present",   check_transliteration_present),
         ("transliteration_format",    check_transliteration_format),
         ("avg_score_tier3",           check_avg_score_tier3),
@@ -379,9 +391,9 @@ def _make_tiers() -> list[TierSpec]:
             n_train=200, n_epochs=2, n_holdout=30, lr=2e-5,
             max_new_tokens=512,
             checks=tier2_checks,
-            # 200×2ep sufficient for content quality + section structure, but NOT for
-            # confidence format — confidence=<0.7> habit requires more gradient steps.
-            # Format checks deferred to tier3 where 200×5ep drives them to target.
+            # 200×2ep sufficient for content quality + section structure.
+            # Tag-format and transliteration checks deferred to tier3 where 200×5ep
+            # provides enough gradient steps for format convergence.
             thresholds={
                 **{c: 0.85 for c, _ in tier0_checks},
                 "headers":              0.80,  # 30-sample holdout noise; tier3 enforces 0.90
@@ -396,28 +408,28 @@ def _make_tiers() -> list[TierSpec]:
             n_train=200, n_epochs=5, n_holdout=50, lr=2e-5,
             max_new_tokens=512,
             checks=tier3_checks,
-            # 200-record cap: if the format isn't learnable from 200 examples the data
-            # or prompt is the problem, not the sample size.  5 epochs on 200 records
-            # gives ~1000 gradient steps — sufficient for convergence without a 2h run.
-            # v12c empirical baselines after extended normalization:
-            #   entailed_non_empty:    65-75% (some outputs have empty/inline entailed)
-            #   confidence_numeric:    75-90% after normalising <X>, -X, inferred,conf=X
-            #   canonical_tag_format:  80-90% after full normalization suite
-            #   avg_score (>= 0.65):   55-65% — lowered from 0.85 target
-            #   transliteration_present: only 16% of training records carry a transliteration;
-            #   expecting >25% generation rate is optimistic for a first v13 run.
+            # 200-record cap: format learnable from 200 examples; data/prompt is the
+            # lever if it's not.  5 epochs ≈ 1000 gradient steps — sufficient for
+            # convergence without a 2h run.
+            # confidence_numeric / canonical_tag_format removed: base_reasoning training
+            # now strips confidence by design so a judge can assign it independently.
+            # clean_tag_format replaces them: checks that (observed)/(inferred) tags
+            # appear without confidence numbers.
+            # v12c empirical baselines (pre-strip):
+            #   entailed_non_empty:    65-75%
+            #   avg_score (>= 0.65):   55-65%
+            #   transliteration_present: only 16% of records — threshold kept low
             thresholds={
                 **{c: 0.90 for c, _ in tier0_checks},
-                "headers":                   0.85,  # v13 observed 85%; format change may affect header detection
-                "entailed_non_empty":        0.75,  # v12c observed 65%; inline-header fix adds ~10%
-                "tags_exclusive":            0.90,  # 100% on v11 after annotation-position fix
-                "confidence_numeric":        0.80,  # normalisation covers <X>, -X, word,conf=N
-                "canonical_tag_format":      0.70,  # full normalization suite raises from 30%→85%+
+                "headers":                   0.85,
+                "entailed_non_empty":        0.75,
+                "tags_exclusive":            0.90,
+                "clean_tag_format":          0.70,  # new: (observed)/(inferred) without confidence
                 "sections_distinct":         0.90,
                 "verbatim_entailed":         0.55,
-                "transliteration_present":   0.25,  # sparse training signal: only 16% of records have translits
-                "transliteration_format":    0.40,  # of those present, most should be correct format
-                "avg_score_tier3":           0.55,  # v12c observed 55%; accept with clean passes
+                "transliteration_present":   0.25,  # sparse signal: 16% of records have translits
+                "transliteration_format":    0.40,
+                "avg_score_tier3":           0.55,
             },
         ),
     ]

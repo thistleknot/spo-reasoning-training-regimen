@@ -30,7 +30,7 @@ class SupervisionPromptContractTests(unittest.TestCase):
     """Lock the prompt instructions for each training regimen."""
 
     def test_base_reasoning_prompt_contract(self) -> None:
-        """Base reasoning uses explicit instruction prompt with confidence annotations."""
+        """Base reasoning prompt uses tag-only format (no confidence); output strips confidence."""
         record = serialize_training_record(make_structured_record())
 
         self.assertEqual(
@@ -46,18 +46,16 @@ class SupervisionPromptContractTests(unittest.TestCase):
                     "2. Entailed Premises",
                     "3. Throughline",
                     "",
-                    "Format each premise as: subject | predicate (observed, confidence=0.9) | object",
+                    "Format each premise as: subject | predicate (observed) | object",
                     '- tag: "observed" for explicit facts, "inferred" for derived facts',
-                    "- confidence: a decimal number in [0,1] — e.g. 1.0 for observed, 0.7 for inferred",
                     "",
                     "VERBATIM EXTRACTION RULE (Entailed Premises only):",
                     "- Subject, predicate, and object MUST be exact, verbatim text copied from the quote above.",
                     "- Do NOT paraphrase, summarize, or invent language for Entailed fields.",
                     "- After each verbatim triplet, add a transliteration on the NEXT LINE in parentheses,",
-                    "  using the same S | P (tag, confidence=N.N) | O format but with plain-English paraphrase:",
-                    '  verbatim:        The unexamined life | is not worth (observed, confidence=1.0) | living',
-                    '  transliteration: (A life without self-reflection | has no (inferred, confidence=0.9) | value)',
-                    "- Transliteration tags/confidence follow the same rules as main premises.",
+                    "  using the same S | P (tag) | O format but with plain-English paraphrase:",
+                    "  verbatim:        The unexamined life | is not worth (observed) | living",
+                    "  transliteration: (A life without self-reflection | has no (inferred) | value)",
                     "IMPORTANT: The Entailed Premises section MUST contain at least one triplet.",
                     "Never leave Entailed Premises empty.",
                     "",
@@ -70,11 +68,11 @@ class SupervisionPromptContractTests(unittest.TestCase):
             "\n".join(
                 [
                     "Non-Entailed Premises:",
-                    "social conformity | is (observed, confidence=1.0) | undesirable",
+                    "social conformity | is (observed) | undesirable",
                     "",
                     "Entailed Premises:",
-                    "people | are (observed, confidence=1.0) | unique individuals",
-                    "authenticity | is (inferred, confidence=0.5) | the only way to be oneself",
+                    "people | are (observed) | unique individuals",
+                    "authenticity | is (inferred) | the only way to be oneself",
                     "",
                     "Throughline:",
                     "One should embrace their own identity rather than imitating others.",
@@ -161,21 +159,22 @@ class SupervisionPromptContractTests(unittest.TestCase):
         )
 
     def test_transliteration_interleaving_in_output_text(self) -> None:
-        """When entailed_transliterations is provided, each verbatim line is followed by its paren triplet."""
+        """When entailed_transliterations is provided, confidence is stripped from both verbatim and paren lines."""
         rec = make_structured_record()
         rec["entailed_transliterations"] = [
             "(human beings | possess (inferred, confidence=0.9) | distinct identities)",
             "(being genuine | is (inferred, confidence=0.8) | the sole path to true selfhood)",
         ]
         record = serialize_training_record(rec)
+        # confidence stripped from both verbatim triplet and its transliteration
         self.assertIn(
-            "people | are (observed, confidence=1.0) | unique individuals\n"
-            "(human beings | possess (inferred, confidence=0.9) | distinct identities)",
+            "people | are (observed) | unique individuals\n"
+            "(human beings | possess (inferred) | distinct identities)",
             record["output_text"],
         )
         self.assertIn(
-            "authenticity | is (inferred, confidence=0.5) | the only way to be oneself\n"
-            "(being genuine | is (inferred, confidence=0.8) | the sole path to true selfhood)",
+            "authenticity | is (inferred) | the only way to be oneself\n"
+            "(being genuine | is (inferred) | the sole path to true selfhood)",
             record["output_text"],
         )
 

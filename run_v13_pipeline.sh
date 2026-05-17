@@ -41,8 +41,8 @@ $PYTHON - <<'PREFLIGHT'
 import json, re, sys
 from pathlib import Path
 
-tag_conf_re = re.compile(r'\(\s*(observed|inferred)\s*,\s*confidence\s*=\s*[0-9]', re.IGNORECASE)
-triplet_re  = re.compile(r'^[^|]+\|[^|]+\|[^|]+$')
+tag_re     = re.compile(r'\(\s*(observed|inferred)\s*\)', re.IGNORECASE)  # tag-only, no confidence
+triplet_re = re.compile(r'^[^|]+\|[^|]+\|[^|]+$')
 
 records = [json.loads(l) for l in Path("data/train_facts_verbatim_v13.jsonl").open()]
 sample  = records[:50]
@@ -54,17 +54,16 @@ for i, r in enumerate(sample):
     for hdr in ("Non-Entailed Premises:", "Entailed Premises:", "Throughline:"):
         if hdr not in out:
             issues.append(f"record {i}: missing header '{hdr}'")
-    # All triplet lines in output must have confidence annotations
+    # All main triplet lines must have a tag annotation (confidence stripped by design)
     for line in out.splitlines():
         line = line.strip()
         if not line or line.endswith(":"):
             continue
-        # Skip transliteration lines (start with '(')
         if line.startswith("(") and line.endswith(")"):
-            continue
+            continue  # transliteration line — handled separately
         if triplet_re.match(line):
-            if "confidence=" not in line:
-                issues.append(f"record {i}: triplet missing confidence: {line[:80]}")
+            if not re.search(r'\(\s*(observed|inferred)', line, re.IGNORECASE):
+                issues.append(f"record {i}: triplet missing tag: {line[:80]}")
                 break
 
 # Transliteration coverage

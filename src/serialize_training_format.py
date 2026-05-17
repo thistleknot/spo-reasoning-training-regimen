@@ -164,6 +164,9 @@ def normalize_quote_text(quote: str) -> str:
 def build_base_reasoning_prompt(quote: str) -> str:
     """Build the canonical base-regimen prompt surface.
 
+    Outputs tag-only annotations — no confidence scores.  Confidence is
+    assigned independently by a judge layer after training.
+
     Preconditions:
         `quote` is the raw quote text from the structured corpus.
     Failure modes:
@@ -181,18 +184,16 @@ def build_base_reasoning_prompt(quote: str) -> str:
             "2. Entailed Premises",
             "3. Throughline",
             "",
-            "Format each premise as: subject | predicate (observed, confidence=0.9) | object",
+            "Format each premise as: subject | predicate (observed) | object",
             '- tag: "observed" for explicit facts, "inferred" for derived facts',
-            "- confidence: a decimal number in [0,1] — e.g. 1.0 for observed, 0.7 for inferred",
             "",
             "VERBATIM EXTRACTION RULE (Entailed Premises only):",
             "- Subject, predicate, and object MUST be exact, verbatim text copied from the quote above.",
             "- Do NOT paraphrase, summarize, or invent language for Entailed fields.",
             "- After each verbatim triplet, add a transliteration on the NEXT LINE in parentheses,",
-            "  using the same S | P (tag, confidence=N.N) | O format but with plain-English paraphrase:",
-            '  verbatim:        The unexamined life | is not worth (observed, confidence=1.0) | living',
-            '  transliteration: (A life without self-reflection | has no (inferred, confidence=0.9) | value)',
-            "- Transliteration tags/confidence follow the same rules as main premises.",
+            "  using the same S | P (tag) | O format but with plain-English paraphrase:",
+            '  verbatim:        The unexamined life | is not worth (observed) | living',
+            '  transliteration: (A life without self-reflection | has no (inferred) | value)',
             "IMPORTANT: The Entailed Premises section MUST contain at least one triplet.",
             "Never leave Entailed Premises empty.",
             "",
@@ -214,19 +215,37 @@ def strip_confidence_annotation(triplet: str) -> str:
     return CONFIDENCE_ANNOTATION_RE.sub(r"(\1)", triplet)
 
 
+def _strip_conf_from_block(block: str) -> str:
+    """Strip confidence= from every pipe-bearing line in a serialized triplet block.
+
+    Applied to base_reasoning training targets so the model learns structure
+    and epistemics tags without numeric confidence — confidence is assigned by
+    an independent judge layer after training.
+
+    Non-triplet lines (headers, empty lines, transliteration lines) are passed
+    through unchanged; only lines containing '|' are processed.
+    """
+    return "\n".join(
+        strip_confidence_annotation(line) if "|" in line else line
+        for line in block.splitlines()
+    )
+
+
 def triplets_to_text(
     triplets: Optional[list[str]],
 ) -> str:
     """Normalize and join triplets to text for training output.
 
-    Each triplet is normalized to canonical (tag, confidence=X) format.
-    Invalid/template/degenerate triplets are dropped.  Returns 'N/A' only
-    when no valid triplets remain.
+    Each triplet is normalized to canonical (tag, confidence=X) format first;
+    callers that need tag-only output should pass the result through
+    _strip_conf_from_block().  Invalid/template/degenerate triplets are
+    dropped.  Returns 'N/A' only when no valid triplets remain.
 
     Preconditions:
         triplets is a list of raw triplet strings from the structured corpus.
     Guarantee:
-        Returned lines match ``subject | (tag, confidence=X) | object`` format.
+        Returned lines match ``subject | predicate (tag, confidence=X) | object``
+        before any downstream confidence strip.
     """
     if not triplets:
         return "N/A"
@@ -284,9 +303,12 @@ def serialize_training_record(structured_record: dict) -> dict:
     - Entailed Premises second, each followed by a transliteration line (teaches verbatim + paraphrase)
     - Throughline last (the conclusion)
 
+    Confidence scores are stripped from all triplet lines in the output so the
+    base_reasoning model learns structure and epistemics tags only.  Numeric
+    confidence is assigned by an independent judge layer after training.
+
     When the record carries an `entailed_transliterations` list, each verbatim
-    entailed triplet is followed by a parenthetical transliteration triplet in
-    the same S|P(tag,conf)|O format.
+    entailed triplet is followed by a parenthetical transliteration triplet.
 
     Args:
         structured_record: {quote, entailed_premises, non_entailed_premises,
@@ -303,15 +325,16 @@ def serialize_training_record(structured_record: dict) -> dict:
 
     input_text = build_base_reasoning_prompt(quote)
 
-    entailed_block = (
+    entailed_block = _strip_conf_from_block(
         _entailed_with_transliterations(entailed, transliterations)
         if transliterations
         else triplets_to_text(entailed)
     )
+    non_entailed_text = _strip_conf_from_block(triplets_to_text(non_entailed))
 
     output_lines = [
         "Non-Entailed Premises:",
-        triplets_to_text(non_entailed),
+        non_entailed_text,
         "",
         "Entailed Premises:",
         entailed_block,

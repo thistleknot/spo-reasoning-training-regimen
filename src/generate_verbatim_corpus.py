@@ -3,18 +3,27 @@
 Uses Qwen/Qwen3.5-0.8B in NF4 (BitsAndBytes) with the verbatim extraction
 prompt.  Progress is checkpointed to a sqlite DB so the run can be resumed.
 
+Each generated record passes a quality gate before being accepted:
+  - at least 1 entailed premise
+  - non-empty throughline
+  - at least 50% of triplets carry a (tag, confidence=N.N) annotation
+On first failure a retry is issued with sampling (temperature=0.7, new seed).
+On second failure the quote is skipped — no NULL is written to the checkpoint.
+Generation stops once --target-records clean records are produced.
+
 Usage:
     python -m src.generate_verbatim_corpus \
         --quotes-path /home/user/root_cache/.cache/huggingface/hub/datasets--Abirate--english_quotes/snapshots/7b544c4920a8be268b48b403c188acf0a462051b/quotes.jsonl \
         --output data/train_structured_verbatim.jsonl \
         --checkpoint data/gen_verbatim_checkpoint.db \
+        --target-records 200 \
         --batch-size 8 \
         --max-new-tokens 512
 
 Preconditions:
     bitsandbytes, transformers>=5.0, torch available in mamba-venv.
 Failure modes:
-    Malformed model outputs are logged and skipped (not written).
+    Records that fail quality gate after two attempts are skipped entirely.
     Run can be safely interrupted and resumed via sqlite checkpoint.
 """
 
@@ -183,6 +192,44 @@ def _extract_throughline(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Quality gate
+# ---------------------------------------------------------------------------
+
+_TAG_CONF_RE = re.compile(
+    r"\(\s*(observed|inferred)\s*,\s*confidence\s*=\s*[0-9]", re.IGNORECASE
+)
+_PIPE_LINE_RE = re.compile(r"^[^|]+\|[^|]+\|[^|]+$")
+
+
+def validate_record(record: Optional[dict]) -> bool:
+    """Return True only when the generated record meets the quality bar.
+
+    Requirements:
+        - at least 1 entailed premise
+        - non-empty throughline (not empty string or bare whitespace)
+        - ≥50% of pipe-bearing triplet lines carry a (tag, confidence=N.N) annotation
+
+    The confidence requirement ensures the teacher model produced usable
+    annotation signal before we strip confidence for base_reasoning training.
+    """
+    if not record:
+        return False
+    entailed = record.get("entailed_premises") or []
+    if not entailed:
+        return False
+    syllogism = (record.get("syllogism") or "").strip()
+    if not syllogism:
+        return False
+    # Gather all pipe-bearing lines across both premise sets
+    all_premises = list(entailed) + list(record.get("non_entailed_premises") or [])
+    pipe_lines = [p for p in all_premises if isinstance(p, str) and _PIPE_LINE_RE.match(p.strip())]
+    if not pipe_lines:
+        return False
+    tagged = sum(1 for p in pipe_lines if _TAG_CONF_RE.search(p))
+    return tagged / len(pipe_lines) >= 0.50
+
+
+# ---------------------------------------------------------------------------
 # Checkpoint
 # ---------------------------------------------------------------------------
 
@@ -204,10 +251,18 @@ def open_checkpoint(path: str) -> sqlite3.Connection:
 
 def already_done(conn: sqlite3.Connection, quote: str) -> Optional[dict]:
     row = conn.execute("SELECT result FROM done WHERE quote=?", (quote,)).fetchone()
-    return json.loads(row[0]) if row else None
+    if not row:
+        return None
+    parsed = json.loads(row[0])
+    # Treat legacy NULL checkpoints as not-done so they get retried
+    return parsed if parsed else None
 
 
-def mark_done(conn: sqlite3.Connection, quote: str, record: Optional[dict]) -> None:
+def mark_done(conn: sqlite3.Connection, quote: str, record: dict) -> None:
+    """Write a verified clean record to the checkpoint.
+
+    Preconditions: record has passed validate_record() — never call with None.
+    """
     conn.execute(
         "INSERT OR REPLACE INTO done (quote, result) VALUES (?, ?)",
         (quote, json.dumps(record)),
@@ -252,13 +307,24 @@ def generate_batch(
     model,
     quotes: list[str],
     max_new_tokens: int = 512,
+    do_sample: bool = False,
+    temperature: float = 0.7,
+    seed: int = 42,
 ) -> list[str]:
     """Generate one response per quote.  Returns raw text strings.
 
     Uses apply_chat_template with a system prompt so the model operates in
     its native instruction-following format.  Any <think>...</think> block is
     stripped before returning.
+
+    Args:
+        do_sample: False = greedy (deterministic, fast); True = sampling (retry path).
+        temperature: sampling temperature; only used when do_sample=True.
+        seed: torch manual seed for reproducible sampling on retry.
     """
+    if do_sample:
+        torch.manual_seed(seed)
+
     prompts = [build_prompt(q) for q in quotes]
 
     messages_batch = [
@@ -283,15 +349,17 @@ def generate_batch(
         max_length=1024,
     ).to(model.device)
 
+    gen_kwargs: dict = dict(
+        max_new_tokens=max_new_tokens,
+        pad_token_id=tokenizer.eos_token_id,
+    )
+    if do_sample:
+        gen_kwargs.update(do_sample=True, temperature=temperature)
+    else:
+        gen_kwargs.update(do_sample=False, temperature=None, top_p=None)
+
     with torch.no_grad():
-        out = model.generate(
-            **enc,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-            temperature=None,
-            top_p=None,
-            pad_token_id=tokenizer.eos_token_id,
-        )
+        out = model.generate(**enc, **gen_kwargs)
 
     input_len = enc["input_ids"].shape[1]
     results = []
@@ -302,6 +370,26 @@ def generate_batch(
         results.append(raw)
     return results
 
+
+def _generate_single(
+    tokenizer,
+    model,
+    quote: str,
+    max_new_tokens: int,
+    do_sample: bool,
+    seed: int,
+) -> Optional[dict]:
+    """Generate and parse one record.  Returns None on any exception."""
+    try:
+        outputs = generate_batch(
+            tokenizer, model, [quote],
+            max_new_tokens=max_new_tokens,
+            do_sample=do_sample, seed=seed,
+        )
+        return parse_output(quote, outputs[0])
+    except Exception as exc:
+        print(f"  [gen error] {exc}", flush=True)
+        return None
 
 # ---------------------------------------------------------------------------
 # Main
@@ -314,7 +402,10 @@ def main() -> None:
     parser.add_argument("--checkpoint", default=DEFAULT_CHECKPOINT)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--max-new-tokens", type=int, default=512)
-    parser.add_argument("--limit", type=int, default=0, help="Process only N quotes (0=all)")
+    parser.add_argument(
+        "--target-records", type=int, default=200,
+        help="Stop after N clean records are produced (0 = unlimited)",
+    )
     args = parser.parse_args()
 
     # Load quotes
@@ -326,76 +417,105 @@ def main() -> None:
             if q:
                 quotes_raw.append(q)
 
-    if args.limit:
-        quotes_raw = quotes_raw[: args.limit]
+    print(f"Total quotes available: {len(quotes_raw)}")
 
-    print(f"Total quotes: {len(quotes_raw)}")
-
-    # Checkpoint
     conn = open_checkpoint(args.checkpoint)
-    done_count = conn.execute("SELECT COUNT(*) FROM done").fetchone()[0]
-    print(f"Already done: {done_count}")
+    already_written = conn.execute("SELECT COUNT(*) FROM done").fetchone()[0]
+    print(f"Already checkpointed: {already_written} clean records")
 
-    # Remaining
-    pending = [q for q in quotes_raw if not already_done(conn, q)]
-    print(f"Pending: {len(pending)}")
+    target = args.target_records if args.target_records > 0 else len(quotes_raw)
+    if already_written >= target:
+        print(f"Target {target} already reached — writing output.")
+        _write_output(conn, target, args.output)
+        conn.close()
+        return
+
+    # Pending: quotes not yet in checkpoint
+    done_quotes: set[str] = {
+        row[0] for row in conn.execute("SELECT quote FROM done").fetchall()
+    }
+    pending = [q for q in quotes_raw if q not in done_quotes]
+    print(f"Pending quotes: {len(pending)}")
 
     if not pending:
-        print("Nothing to do — all quotes already processed.")
+        print("No pending quotes — writing output from checkpoint.")
+        _write_output(conn, target, args.output)
         conn.close()
-        _write_output(conn, quotes_raw, args.output)
         return
 
     tokenizer, model = load_model_nf4(MODEL_NAME)
 
     bs = args.batch_size
+    written = already_written
     skipped = 0
-    written = 0
+    retry_count = 0
+    quote_idx = 0
 
-    for batch_start in range(0, len(pending), bs):
-        batch = pending[batch_start : batch_start + bs]
+    while written < target and quote_idx < len(pending):
+        # Greedy batch pass
+        batch = pending[quote_idx : quote_idx + bs]
+        quote_idx += len(batch)
+
         try:
-            outputs = generate_batch(tokenizer, model, batch, args.max_new_tokens)
+            outputs = generate_batch(
+                tokenizer, model, batch, args.max_new_tokens,
+                do_sample=False,
+            )
         except Exception as exc:
-            print(f"[BATCH ERROR @ {batch_start}] {exc} — marking batch as null and continuing", flush=True)
-            for quote in batch:
-                mark_done(conn, quote, None)
+            print(f"[BATCH ERROR] {exc} — skipping batch", flush=True)
             skipped += len(batch)
             continue
 
+        retry_queue: list[str] = []
         for quote, raw_output in zip(batch, outputs):
             record = parse_output(quote, raw_output)
-            mark_done(conn, quote, record)
-            if record:
+            if validate_record(record):
+                mark_done(conn, quote, record)
                 written += 1
             else:
-                skipped += 1
+                retry_queue.append(quote)
 
-        done_total = done_count + batch_start + len(batch)
-        pct = 100 * done_total / len(quotes_raw)
+        # Retry failures individually with sampling
+        for quote in retry_queue:
+            if written >= target:
+                break
+            record = _generate_single(
+                tokenizer, model, quote, args.max_new_tokens,
+                do_sample=True, seed=retry_count,
+            )
+            retry_count += 1
+            if validate_record(record):
+                mark_done(conn, quote, record)
+                written += 1
+            else:
+                # Two attempts exhausted — skip this quote entirely (no NULL written)
+                skipped += 1
+                print(f"  [skip] quality gate failed twice for: {quote[:60]!r}", flush=True)
+
         print(
-            f"[{done_total}/{len(quotes_raw)} {pct:.1f}%] "
-            f"written={written} skipped={skipped}",
+            f"[progress] written={written}/{target}  skipped={skipped}  "
+            f"quotes_seen={quote_idx}/{len(pending)}",
             flush=True,
         )
 
     conn.close()
     print("Generation done. Writing output JSONL…")
     conn2 = open_checkpoint(args.checkpoint)
-    _write_output(conn2, quotes_raw, args.output)
+    _write_output(conn2, target, args.output)
     conn2.close()
 
 
-def _write_output(conn: sqlite3.Connection, quotes: list[str], path: str) -> None:
-    """Write all successfully parsed records to JSONL."""
+def _write_output(conn: sqlite3.Connection, limit: int, path: str) -> None:
+    """Write up to limit verified records from the checkpoint to JSONL."""
     out_path = Path(path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    rows = conn.execute("SELECT result FROM done LIMIT ?", (limit,)).fetchall()
     n = 0
     with open(out_path, "w") as f:
-        for q in quotes:
-            row = already_done(conn, q)
-            if row:
-                f.write(json.dumps(row) + "\n")
+        for (result_json,) in rows:
+            record = json.loads(result_json)
+            if record:  # guard against any legacy NULL rows
+                f.write(json.dumps(record) + "\n")
                 n += 1
     print(f"Wrote {n} records → {out_path}")
 

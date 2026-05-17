@@ -66,10 +66,17 @@ def normalize_record(record: dict) -> dict:
 
 
 def serialize_facts_with_confidence_record(structured_record: dict) -> dict:
-    """Build a quote -> facts-with-confidence training record."""
+    """Build a quote -> facts-with-confidence training record.
+
+    Preserves the 3-section format from tier3 (Non-Entailed / Entailed /
+    Throughline) so tier4 training doesn't force the model to unlearn a new
+    section structure.  The only difference from tier3 output is that triplets
+    carry (tag, confidence=N.N) annotations.
+    """
     quote = normalize_quote_text(structured_record.get("quote", ""))
     non_entailed = structured_record.get("non_entailed_premises")
     entailed = structured_record.get("entailed_premises")
+    syllogism = (structured_record.get("syllogism") or "").strip() or "N/A"
 
     input_text = f"""Given this quote, extract the implicit reasoning facts.
 
@@ -78,6 +85,7 @@ Quote: "{quote}"
 Generate a response with:
 1. Non-Entailed Premises
 2. Entailed Premises
+3. Throughline
 
 Format each premise as: subject | (tag, confidence=N) | object
 - tag: "observed" for explicit facts, "inferred" for derived facts
@@ -92,6 +100,9 @@ Response:"""
             "",
             "Entailed Premises:",
             triplets_to_text(entailed),
+            "",
+            "Throughline:",
+            f"  {syllogism}",
         ]
     )
 

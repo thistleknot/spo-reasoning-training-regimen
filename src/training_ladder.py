@@ -451,10 +451,10 @@ def _make_tiers() -> list[TierSpec]:
     # Teaches the model to produce (tag, confidence=N) annotations on top of the
     # tag-only base the previous three tiers established.  Uses a separate corpus
     # (confidence-bearing serialization of the same structured records).
-    # check_headers is intentionally absent: facts_with_confidence has no Throughline
-    # section, so the 3-header gate would always fail (2/3 = 0.67 < required 1.0).
+    # Format is kept identical to tier3 (3 sections: Non-Entailed / Entailed / Throughline)
+    # so the model doesn't need to unlearn format; it only adds confidence values.
     tier4_checks = [
-        ("facts_headers",           check_facts_headers),
+        ("headers",                 check_headers),
         ("pipes_well_formed",       check_pipes_well_formed),
         ("entailed_non_empty",      check_entailed_non_empty),
         ("confidence_numeric",      check_confidence_numeric),
@@ -547,12 +547,10 @@ def _make_tiers() -> list[TierSpec]:
             max_new_tokens=512,
             checks=tier4_checks,
             # 5 epochs (1000 gradient steps) needed to overcome tier3 prior (1057×5 = 5285 steps).
-            # 3 epochs was insufficient: entailed_non_empty reached 42% vs 75% needed.
-            # check_facts_headers validates the 2 factual-section headers (no Throughline).
-            # check_canonical_tag_format threshold is conservative (0.65) because the model
-            # may hedge with tag-only output during the first epoch before fully committing.
+            # Format kept as 3-section (Non-Entailed / Entailed / Throughline) matching tier3 so
+            # the model only learns to add confidence values, not a new section structure.
             thresholds={
-                "facts_headers":           0.80,
+                "headers":                 0.80,
                 "pipes_well_formed":       0.85,
                 "entailed_non_empty":      0.75,
                 "confidence_numeric":      0.70,

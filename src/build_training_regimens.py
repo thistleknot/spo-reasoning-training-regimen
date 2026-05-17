@@ -180,25 +180,64 @@ def serialize_regimen_record(structured_record: dict, regimen: TrainingRegimen) 
     raise ValueError(f"Unsupported regimen: {regimen}")
 
 
+def _is_valid_for_regimen(structured: dict, regimen: TrainingRegimen) -> bool:
+    """Return True iff the structured record is clean enough to train on.
+
+    FACTS_WITH_CONFIDENCE: entailed premises must have at least one valid pipe
+    triplet so the model never sees an empty Entailed Premises section.
+    SYLLOGISM_WITH_CONFIDENCE: entailed confidence must resolve to a float (no N/A
+    throughline or missing premises).
+    """
+    if regimen == TrainingRegimen.FACTS_WITH_CONFIDENCE:
+        entailed = structured.get("entailed_premises")
+        return triplets_to_text(entailed) != "N/A"
+    if regimen == TrainingRegimen.SYLLOGISM_WITH_CONFIDENCE:
+        entailed = structured.get("entailed_premises")
+        syllogism = structured.get("syllogism") or "N/A"
+        if syllogism == "N/A":
+            return False
+        return aggregate_syllogism_confidence(entailed) is not None
+    return True
+
+
 def build_training_regimen_dataset(
     input_file: str,
     output_file: str,
     regimen: TrainingRegimen,
+    max_records: int = 200,
 ) -> dict:
-    """Convert a JSONL source file into one of the follow-on regimens."""
+    """Convert a JSONL source file into one of the follow-on regimens.
+
+    Scans the full input file but stops after writing max_records clean rows.
+    Records that fail quality gates for their regimen are skipped and counted.
+
+    Preconditions:
+        input_file is a JSONL file of structured or training-style records.
+        max_records >= 1.
+    Guarantee:
+        output_file contains at most max_records rows, all passing the regimen
+        quality gate (non-empty entailed premises for facts_with_confidence,
+        non-N/A confidence for syllogism_with_confidence).
+    """
     stats = {
         "total": 0,
         "converted": 0,
+        "skipped_quality": 0,
         "errors": 0,
         "regimen": regimen.value,
     }
 
     with open(input_file) as infile, open(output_file, "w") as outfile:
         for line in infile:
+            if stats["converted"] >= max_records:
+                break
             try:
                 record = json.loads(line)
                 stats["total"] += 1
                 structured = normalize_record(record)
+                if not _is_valid_for_regimen(structured, regimen):
+                    stats["skipped_quality"] += 1
+                    continue
                 regimen_record = serialize_regimen_record(structured, regimen)
                 outfile.write(json.dumps(regimen_record) + "\n")
                 stats["converted"] += 1
@@ -223,6 +262,12 @@ if __name__ == "__main__":
         choices=[regimen.value for regimen in TrainingRegimen],
         help="Which follow-on regimen to build",
     )
+    parser.add_argument(
+        "--max-records",
+        type=int,
+        default=200,
+        help="Maximum number of quality-filtered records to write (default: 200)",
+    )
 
     args = parser.parse_args()
 
@@ -230,6 +275,7 @@ if __name__ == "__main__":
         args.input,
         args.output,
         TrainingRegimen(args.regimen),
+        max_records=args.max_records,
     )
 
     print("\n=== REGIMEN BUILD STATISTICS ===")

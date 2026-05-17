@@ -808,6 +808,143 @@ class TestRegimenChecks(unittest.TestCase):
         self.assertFalse(self.syl_conf(output, {}))
 
 
+class TestRegimenQualityGate(unittest.TestCase):
+    """Unit tests for _is_valid_for_regimen quality filter and max_records cap."""
+
+    def setUp(self) -> None:
+        from src.build_training_regimens import (
+            _is_valid_for_regimen,
+            TrainingRegimen,
+        )
+        self._is_valid = _is_valid_for_regimen
+        self.FACTS = TrainingRegimen.FACTS_WITH_CONFIDENCE
+        self.SYL = TrainingRegimen.SYLLOGISM_WITH_CONFIDENCE
+
+    # ── FACTS_WITH_CONFIDENCE gate ───────────────────────────────────────────
+
+    def test_facts_valid_entailed(self) -> None:
+        record = {
+            "quote": "test",
+            "entailed_premises": ["S | pred (observed) | O"],
+            "non_entailed_premises": [],
+            "syllogism": None,
+        }
+        self.assertTrue(self._is_valid(record, self.FACTS))
+
+    def test_facts_empty_entailed_rejected(self) -> None:
+        record = {
+            "quote": "test",
+            "entailed_premises": [],
+            "non_entailed_premises": ["S | pred (observed) | O"],
+            "syllogism": None,
+        }
+        self.assertFalse(self._is_valid(record, self.FACTS))
+
+    def test_facts_none_entailed_rejected(self) -> None:
+        record = {
+            "quote": "test",
+            "entailed_premises": None,
+            "non_entailed_premises": None,
+            "syllogism": None,
+        }
+        self.assertFalse(self._is_valid(record, self.FACTS))
+
+    # ── SYLLOGISM_WITH_CONFIDENCE gate ───────────────────────────────────────
+
+    def test_syllogism_valid(self) -> None:
+        record = {
+            "quote": "test",
+            "entailed_premises": ["S | pred (observed) | O"],
+            "non_entailed_premises": [],
+            "syllogism": "The argument holds.",
+        }
+        self.assertTrue(self._is_valid(record, self.SYL))
+
+    def test_syllogism_na_syllogism_rejected(self) -> None:
+        record = {
+            "quote": "test",
+            "entailed_premises": ["S | pred (observed) | O"],
+            "non_entailed_premises": [],
+            "syllogism": "N/A",
+        }
+        self.assertFalse(self._is_valid(record, self.SYL))
+
+    def test_syllogism_none_confidence_rejected(self) -> None:
+        record = {
+            "quote": "test",
+            "entailed_premises": None,
+            "non_entailed_premises": [],
+            "syllogism": "Some throughline.",
+        }
+        self.assertFalse(self._is_valid(record, self.SYL))
+
+    # ── max_records cap ──────────────────────────────────────────────────────
+
+    def test_max_records_caps_output(self) -> None:
+        import json, tempfile, os
+        from src.build_training_regimens import build_training_regimen_dataset
+
+        rows = [
+            json.dumps({
+                "quote": f"q{i}",
+                "entailed_premises": [f"S{i} | pred (observed) | O{i}"],
+                "non_entailed_premises": [f"X{i} | pred (observed) | Y{i}"],
+                "syllogism": f"syllogism {i}",
+            }) + "\n"
+            for i in range(10)
+        ]
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.writelines(rows)
+            inp = f.name
+        out = inp + ".out.jsonl"
+        try:
+            stats = build_training_regimen_dataset(
+                inp, out, self.FACTS, max_records=4
+            )
+            self.assertEqual(stats["converted"], 4)
+            with open(out) as fout:
+                self.assertEqual(len(fout.readlines()), 4)
+        finally:
+            os.unlink(inp)
+            if os.path.exists(out):
+                os.unlink(out)
+
+    def test_quality_skipped_counted(self) -> None:
+        import json, tempfile, os
+        from src.build_training_regimens import build_training_regimen_dataset
+
+        rows = [
+            # 3 valid records
+            *[json.dumps({
+                "quote": f"q{i}",
+                "entailed_premises": [f"S{i} | pred (observed) | O{i}"],
+                "non_entailed_premises": [],
+                "syllogism": "irrelevant",
+            }) + "\n" for i in range(3)],
+            # 2 invalid records (empty entailed)
+            *[json.dumps({
+                "quote": f"bad{i}",
+                "entailed_premises": [],
+                "non_entailed_premises": [],
+                "syllogism": None,
+            }) + "\n" for i in range(2)],
+        ]
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            f.writelines(rows)
+            inp = f.name
+        out = inp + ".out.jsonl"
+        try:
+            stats = build_training_regimen_dataset(
+                inp, out, self.FACTS, max_records=200
+            )
+            self.assertEqual(stats["converted"], 3)
+            self.assertEqual(stats["skipped_quality"], 2)
+        finally:
+            os.unlink(inp)
+            if os.path.exists(out):
+                os.unlink(out)
+
+
 if __name__ == "__main__":
     unittest.main()
 

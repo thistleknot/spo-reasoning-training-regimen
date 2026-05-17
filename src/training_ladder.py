@@ -236,7 +236,11 @@ def check_avg_score_tier3(output: str, record: dict) -> bool:
 
 
 # transliteration: parenthetical paraphrase triplet after each entailed verbatim line
-_TRANSLIT_RE = re.compile(r"^\(([^|)]+)\|([^|)]+)\|([^|)]+)\)\s*$")
+# Matches a transliteration line: (subject | predicate | object) where the
+# predicate field may contain annotation parens like "(inferred)" or
+# "(observed, confidence=0.9)".  Using [^|]+? for subject/predicate (no "|"
+# allowed) and .+? for object, all non-greedy before \s*\).
+_TRANSLIT_RE = re.compile(r"^\(\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*(.+?)\s*\)\s*$")
 
 
 def _extract_entailed_block_lines(output: str) -> list[str]:

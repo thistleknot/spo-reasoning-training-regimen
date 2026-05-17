@@ -6,10 +6,17 @@ prompt.  Progress is checkpointed to a sqlite DB so the run can be resumed.
 Each generated record passes a quality gate before being accepted:
   - at least 1 entailed premise
   - non-empty throughline
-  - at least 50% of triplets carry a (tag, confidence=N.N) annotation
+  - ALL triplets carry a (tag, confidence=N.N) annotation (100% threshold)
+  - NO bare-tag predicates: every predicate must be a verb phrase, never just
+    "(inferred)" or "(observed)" with no text before it
+  - Completeness: total premise count >= number of sentences in the quote
+    so every claim in the quote is represented by at least one premise
 On first failure a retry is issued with sampling (temperature=0.7, new seed).
 On second failure the quote is skipped — no NULL is written to the checkpoint.
 Generation stops once --target-records clean records are produced.
+
+Emojibake (UTF-8 decoded as latin-1, e.g. â€™ for ') is fixed with ftfy
+before quotes are passed to the model and before records are stored.
 
 Usage:
     python -m src.generate_verbatim_corpus \
@@ -37,6 +44,8 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+import ftfy
+import nltk
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 
@@ -80,9 +89,10 @@ def build_prompt(quote: str) -> str:
 
     Preconditions: quote is a non-empty string.
     Guarantee: returned prompt includes few-shot examples showing verb-phrase predicates.
+               emojibake is fixed before inserting into the prompt.
     Failure modes: empty quote yields a degenerate prompt but will not raise.
     """
-    q = quote.strip().strip('"').strip('\u201c').strip('\u201d').strip()
+    q = ftfy.fix_text(quote).strip().strip('"').strip('\u201c').strip('\u201d').strip()
     return (
         f'{_FEW_SHOT_EXAMPLES}\n'
         f'Now extract for this quote:\n\n'
@@ -199,6 +209,8 @@ _TAG_CONF_RE = re.compile(
     r"\(\s*(observed|inferred)\s*,\s*confidence\s*=\s*[0-9]", re.IGNORECASE
 )
 _PIPE_LINE_RE = re.compile(r"^[^|]+\|[^|]+\|[^|]+$")
+# Predicate field starts immediately with a tag annotation: no verb phrase before '('
+_BARE_PRED_RE = re.compile(r"^\s*\(?\s*(observed|inferred)\b", re.IGNORECASE)
 
 
 def validate_record(record: Optional[dict]) -> bool:
@@ -207,7 +219,11 @@ def validate_record(record: Optional[dict]) -> bool:
     Requirements:
         - at least 1 entailed premise
         - non-empty throughline (not empty string or bare whitespace)
-        - ≥50% of pipe-bearing triplet lines carry a (tag, confidence=N.N) annotation
+        - ALL pipe-bearing triplets carry a (tag, confidence=N.N) annotation (100%)
+        - NO bare-tag predicates: predicate must be a verb phrase, never just
+          "(inferred)" or "(observed)" with no text before the opening paren
+        - Completeness: total premise count >= number of sentences in the quote,
+          ensuring every claim in a multi-sentence quote is extracted
 
     The confidence requirement ensures the teacher model produced usable
     annotation signal before we strip confidence for base_reasoning training.
@@ -220,13 +236,34 @@ def validate_record(record: Optional[dict]) -> bool:
     syllogism = (record.get("syllogism") or "").strip()
     if not syllogism:
         return False
-    # Gather all pipe-bearing lines across both premise sets
-    all_premises = list(entailed) + list(record.get("non_entailed_premises") or [])
+
+    non_entailed = list(record.get("non_entailed_premises") or [])
+    all_premises = list(entailed) + non_entailed
     pipe_lines = [p for p in all_premises if isinstance(p, str) and _PIPE_LINE_RE.match(p.strip())]
     if not pipe_lines:
         return False
+
+    # All triplets must carry a (tag, confidence=N.N) annotation
     tagged = sum(1 for p in pipe_lines if _TAG_CONF_RE.search(p))
-    return tagged / len(pipe_lines) >= 0.50
+    if tagged < len(pipe_lines):
+        return False
+
+    # Reject bare-tag predicates: predicate field must contain a verb phrase
+    for p in pipe_lines:
+        parts = [f.strip() for f in p.split("|")]
+        if len(parts) == 3 and _BARE_PRED_RE.match(parts[1]):
+            return False
+
+    # Completeness: total premises must cover every sentence in the quote
+    quote_text = ftfy.fix_text(record.get("quote", ""))
+    try:
+        n_sents = len(nltk.sent_tokenize(quote_text))
+    except Exception:
+        n_sents = 1
+    if len(all_premises) < n_sents:
+        return False
+
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -408,12 +445,12 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # Load quotes
+    # Load quotes — apply emojibake fix at load time
     quotes_raw = []
     with open(args.quotes_path) as f:
         for line in f:
             d = json.loads(line)
-            q = d.get("quote", "").strip()
+            q = ftfy.fix_text(d.get("quote", "").strip())
             if q:
                 quotes_raw.append(q)
 

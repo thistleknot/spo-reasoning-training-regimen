@@ -194,14 +194,28 @@ def serialize_regimen_record(structured_record: dict, regimen: TrainingRegimen) 
 def _is_valid_for_regimen(structured: dict, regimen: TrainingRegimen) -> bool:
     """Return True iff the structured record is clean enough to train on.
 
-    FACTS_WITH_CONFIDENCE: entailed premises must have at least one valid pipe
-    triplet so the model never sees an empty Entailed Premises section.
-    SYLLOGISM_WITH_CONFIDENCE: entailed confidence must resolve to a float (no N/A
-    throughline or missing premises).
+    FACTS_WITH_CONFIDENCE:
+        - Entailed premises must have at least one valid pipe triplet (not N/A)
+        - No bare-tag predicates: every predicate field must contain a verb
+          phrase, never just "(inferred)" or "(observed)" with no text before it
+    SYLLOGISM_WITH_CONFIDENCE:
+        - Entailed confidence must resolve to a float (no N/A throughline or
+          missing premises)
     """
+    _bare_pred_re = re.compile(r"^\s*\(?\s*(observed|inferred)\b", re.IGNORECASE)
+
     if regimen == TrainingRegimen.FACTS_WITH_CONFIDENCE:
-        entailed = structured.get("entailed_premises")
-        return triplets_to_text(entailed) != "N/A"
+        entailed = structured.get("entailed_premises") or []
+        non_entailed = structured.get("non_entailed_premises") or []
+        if triplets_to_text(entailed) == "N/A":
+            return False
+        for p in list(entailed) + list(non_entailed):
+            if not isinstance(p, str):
+                continue
+            parts = [f.strip() for f in p.split("|")]
+            if len(parts) == 3 and _bare_pred_re.match(parts[1]):
+                return False
+        return True
     if regimen == TrainingRegimen.SYLLOGISM_WITH_CONFIDENCE:
         entailed = structured.get("entailed_premises")
         syllogism = structured.get("syllogism") or "N/A"

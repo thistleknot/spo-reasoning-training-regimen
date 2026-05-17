@@ -1032,6 +1032,141 @@ class TestBootstrapPredicates(unittest.TestCase):
         self.assertIsNone(_TRIPLET_LINE_RE.match("S | (inferred) | C | D | E"))
 
 
+class TestValidateRecord(unittest.TestCase):
+    """Tests for generate_verbatim_corpus.validate_record() quality gate."""
+
+    def setUp(self):
+        from src.generate_verbatim_corpus import validate_record
+        self.validate = validate_record
+
+    def _good(self, **overrides):
+        base = {
+            "quote": "You are a soul. You have a body.",
+            "entailed_premises": [
+                "you | are a (inferred, confidence=0.9) | soul",
+                "you | have a (observed, confidence=1.0) | body",
+            ],
+            "non_entailed_premises": [
+                "body | is (inferred, confidence=0.7) | temporary"
+            ],
+            "syllogism": "Identity is spiritual, not physical.",
+        }
+        base.update(overrides)
+        return base
+
+    def test_valid_record_passes(self):
+        self.assertTrue(self.validate(self._good()))
+
+    def test_none_fails(self):
+        self.assertFalse(self.validate(None))
+
+    def test_empty_entailed_fails(self):
+        self.assertFalse(self.validate(self._good(entailed_premises=[])))
+
+    def test_missing_syllogism_fails(self):
+        self.assertFalse(self.validate(self._good(syllogism="")))
+
+    def test_bare_tag_predicate_in_entailed_fails(self):
+        """Predicate is just a bare tag with no verb phrase."""
+        rec = self._good(entailed_premises=[
+            "Doctor | (inferred, confidence=0.7) | soul",
+        ])
+        self.assertFalse(self.validate(rec))
+
+    def test_bare_word_predicate_in_entailed_fails(self):
+        """Predicate is just the tag word without parens."""
+        rec = self._good(entailed_premises=[
+            "Doctor | inferred | soul",
+        ])
+        self.assertFalse(self.validate(rec))
+
+    def test_bare_tag_in_non_entailed_fails(self):
+        rec = self._good(non_entailed_premises=[
+            "soul | observed | body",
+        ])
+        self.assertFalse(self.validate(rec))
+
+    def test_missing_confidence_fails(self):
+        """Triplet with tag but no confidence=N.N annotation fails 100% threshold."""
+        rec = self._good(entailed_premises=[
+            "you | are a (inferred) | soul",
+            "you | have a (observed, confidence=1.0) | body",
+        ])
+        self.assertFalse(self.validate(rec))
+
+    def test_completeness_check_single_sentence(self):
+        """Single-sentence quote needs >= 1 premise total — passes."""
+        rec = self._good(
+            quote="You are a soul.",
+            entailed_premises=["you | are a (inferred, confidence=0.9) | soul"],
+            non_entailed_premises=[],
+        )
+        self.assertTrue(self.validate(rec))
+
+    def test_completeness_check_multi_sentence_fails(self):
+        """Three-sentence quote with only 1 premise total fails."""
+        rec = self._good(
+            quote="You are a soul. You have a body. The body is temporary.",
+            entailed_premises=["you | are a (inferred, confidence=0.9) | soul"],
+            non_entailed_premises=[],
+        )
+        self.assertFalse(self.validate(rec))
+
+    def test_completeness_check_multi_sentence_passes(self):
+        """Three-sentence quote with 3 premises total passes."""
+        rec = self._good(
+            quote="You are a soul. You have a body. The body is temporary.",
+            entailed_premises=[
+                "you | are a (inferred, confidence=0.9) | soul",
+                "you | have a (observed, confidence=1.0) | body",
+            ],
+            non_entailed_premises=[
+                "body | is (inferred, confidence=0.7) | temporary"
+            ],
+        )
+        self.assertTrue(self.validate(rec))
+
+    def test_emojibake_quote_still_validates(self):
+        """Record with emojibake quote passes after ftfy fix in completeness check."""
+        rec = self._good(quote="\u201cYou don\u00e2\u20ac\u2122t have a soul. You are a soul.\u201d")
+        self.assertTrue(self.validate(rec))
+
+
+class TestIsValidForRegimenBarePredicate(unittest.TestCase):
+    """Tests for _is_valid_for_regimen bare-predicate rejection."""
+
+    def setUp(self):
+        from src.build_training_regimens import _is_valid_for_regimen, TrainingRegimen
+        self.gate = _is_valid_for_regimen
+        self.FACTS = TrainingRegimen.FACTS_WITH_CONFIDENCE
+
+    def _rec(self, entailed, non_entailed=None):
+        return {
+            "entailed_premises": entailed,
+            "non_entailed_premises": non_entailed or [],
+            "syllogism": "A conclusion.",
+        }
+
+    def test_verb_phrase_predicate_passes(self):
+        rec = self._rec(["Doctor | are a (inferred, confidence=0.9) | soul"])
+        self.assertTrue(self.gate(rec, self.FACTS))
+
+    def test_bare_tag_predicate_entailed_fails(self):
+        rec = self._rec(["Doctor | (inferred, confidence=0.7) | soul"])
+        self.assertFalse(self.gate(rec, self.FACTS))
+
+    def test_bare_word_predicate_entailed_fails(self):
+        rec = self._rec(["Doctor | inferred | soul"])
+        self.assertFalse(self.gate(rec, self.FACTS))
+
+    def test_bare_tag_in_non_entailed_fails(self):
+        rec = self._rec(
+            ["Doctor | are a (inferred, confidence=0.9) | soul"],
+            non_entailed=["soul | observed | body"],
+        )
+        self.assertFalse(self.gate(rec, self.FACTS))
+
+
 class TestIsBadRecord(unittest.TestCase):
     """Tests for is_bad_record empty-entailed guard."""
 

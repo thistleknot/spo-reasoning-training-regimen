@@ -209,13 +209,6 @@ class SPOTrainer:
             in a future version. Returns 0.0 for all inputs.
         """
         return 0.0
-            output,
-            flags=re.IGNORECASE,
-        )
-        if section_match:
-            return float(section_match.group(1))
-
-        return 0.5  # Default
 
     def evaluate_batch(
         self,

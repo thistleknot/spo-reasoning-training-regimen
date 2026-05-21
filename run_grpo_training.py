@@ -123,6 +123,59 @@ def _build_parser():
         default=0.3,
         help="Reward weight for conclusion coherence probe.",
     )
+    parser.add_argument(
+        "--confidence-samples",
+        type=int,
+        default=4,
+        help=(
+            "K: confidence rating samples per completion from the frozen judge. "
+            "0 disables the confidence distribution signal. "
+            "Total scoring work per quote = group-size × (probes + confidence-samples)."
+        ),
+    )
+    parser.add_argument(
+        "--confidence-weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Budget for the confidence distribution signal (conf_mean × (1 - conf_std)). "
+            "The structural weights (entailment + non_entailment + conclusion) are scaled "
+            "to fill the remainder (1 - confidence-weight). Set > 0 to activate."
+        ),
+    )
+    parser.add_argument(
+        "--confidence-temperature",
+        type=float,
+        default=0.7,
+        help="Sampling temperature for K confidence score generations.",
+    )
+    parser.add_argument(
+        "--dead-quote-streak-threshold",
+        type=int,
+        default=2,
+        help=(
+            "Prune a quote after this many consecutive epochs where every completion "
+            "in the group scores 0.0. Requires multi-epoch consensus before pruning."
+        ),
+    )
+    parser.add_argument(
+        "--shared-base",
+        action="store_true",
+        default=False,
+        help=(
+            "Load the base model once and mount policy + judge as two named PEFT adapters. "
+            "Reduces peak VRAM from ~2× to ~1× model size. "
+            "Required for sub-1B models targeting a 400MB budget."
+        ),
+    )
+    parser.add_argument(
+        "--base-model-name",
+        default=None,
+        help=(
+            "HuggingFace model ID for the base model when --shared-base is set. "
+            "E.g. 'Qwen/Qwen3-0.6B'. Defaults to the base model recorded in the adapter config."
+        ),
+    )
     return parser
 
 
@@ -152,6 +205,12 @@ if __name__ == "__main__":
         judge_entailment_weight=args.judge_entailment_weight,
         judge_non_entailment_weight=args.judge_non_entailment_weight,
         judge_conclusion_weight=args.judge_conclusion_weight,
+        confidence_samples=args.confidence_samples,
+        confidence_weight=args.confidence_weight,
+        confidence_temperature=args.confidence_temperature,
+        dead_quote_streak_threshold=args.dead_quote_streak_threshold,
+        shared_base=args.shared_base,
+        base_model_name=args.base_model_name,
     )
 
     result = run_grpo_training(config)

@@ -68,6 +68,16 @@ class GRPOConfig:
     # is genuinely unproductive rather than a transient bad generation.
     dead_quote_streak_threshold: int = 2
 
+    # Shared-base adapter mode: mount policy + judge as named adapters on one
+    # base model to keep peak VRAM near 1× model size instead of 2×.
+    shared_base: bool = False
+    base_model_name: Optional[str] = None  # inferred from adapter config if None
+
+    # Confidence distribution signal
+    confidence_samples: int = 4          # K samples per completion (0 = disabled)
+    confidence_weight: float = 0.0       # reward budget for conf signal (0 = disabled)
+    confidence_temperature: float = 0.7
+
     # Optimizer
     learning_rate: float = 1e-5
     beta: float = 0.1                          # KL penalty weight
@@ -150,6 +160,9 @@ class GRPOTrainer:
         self.tokenizer = tokenizer
         self.judge = judge
         self.config = config
+        # Dead-quote pruning state: track consecutive all-zero-group epochs per quote
+        self._zero_streaks: Dict[str, int] = {}
+        self.dead_quotes: set = set()
 
     def sample_group(self, prompt: str) -> List[str]:
         """Sample G completions from the live policy for one prompt.
@@ -304,6 +317,7 @@ class GRPOTrainer:
         total_reward = 0.0
         total_adv_std = 0.0
         step = 0
+        newly_pruned = 0
         optimizer.zero_grad()
 
         for batch_idx, batch in enumerate(dataloader, start=1):
@@ -312,8 +326,28 @@ class GRPOTrainer:
 
             batch_loss = torch.tensor(0.0, device=self.model.device)
             for quote, prompt in zip(quotes, prompts):
+                # Skip quotes confirmed unproductive across multiple epochs
+                if quote in self.dead_quotes:
+                    continue
+
                 completions = self.sample_group(prompt)
                 rewards = self.score_group(quote, completions)
+
+                # All-zero group: increment streak; prune after threshold
+                if max(rewards) == 0.0:
+                    streak = self._zero_streaks.get(quote, 0) + 1
+                    self._zero_streaks[quote] = streak
+                    if streak >= self.config.dead_quote_streak_threshold:
+                        self.dead_quotes.add(quote)
+                        newly_pruned += 1
+                        print(
+                            f"  [prune] Dead quote after {streak} all-zero epochs "
+                            f"(total dead: {len(self.dead_quotes)}): {quote[:60]!r}"
+                        )
+                    continue  # no gradient signal; skip loss step
+
+                # Non-zero group: reset streak and proceed with update
+                self._zero_streaks.pop(quote, None)
                 advantages = self.normalize_group(rewards)
 
                 total_reward += sum(rewards) / len(rewards)
@@ -350,6 +384,8 @@ class GRPOTrainer:
             "mean_reward": total_reward / n,
             "mean_advantage_std": total_adv_std / n,
             "steps": step,
+            "newly_pruned": newly_pruned,
+            "total_dead_quotes": len(self.dead_quotes),
         }
 
 
@@ -360,6 +396,17 @@ class GRPOTrainer:
 def run_grpo_training(config: GRPOConfig) -> dict:
     """Run the GRPO outer loop with patience-gated termination.
 
+    Supports two model-loading modes controlled by config.shared_base:
+
+    Standalone (default):
+        Loads separate model instances for policy and judge. Simple but uses
+        ~2× model VRAM.
+
+    Shared-base (config.shared_base = True):
+        Loads the base model once (4-bit quantized), mounts policy and judge
+        as two named PEFT adapters. Peak VRAM ≈ 1× model + two small LoRA
+        weight sets. Required for sub-1B models targeting a 400MB budget.
+
     Preconditions:
         config.adapter_path exists and contains a PEFT adapter.
         config.dataset_path exists and contains JSONL records with 'quote' or 'input_text'.
@@ -368,31 +415,89 @@ def run_grpo_training(config: GRPOConfig) -> dict:
         Training history is written to output_dir/grpo_history.jsonl.
         Summary is written to output_dir/grpo_summary.json.
     """
+    from peft import PeftModel
+    from transformers import AutoModelForCausalLM, BitsAndBytesConfig
+
     output_dir = Path(config.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     judge_path = config.judge_path or config.adapter_path
 
-    # Load frozen judge first (lighter — no grad)
-    print(f"Loading frozen judge from {judge_path} ...")
-    judge = FrozenJudge(
-        adapter_path=judge_path,
+    _judge_kwargs = dict(
         entailment_weight=config.judge_entailment_weight,
         non_entailment_weight=config.judge_non_entailment_weight,
         conclusion_weight=config.judge_conclusion_weight,
+        confidence_samples=config.confidence_samples,
+        confidence_weight=config.confidence_weight,
+        confidence_temperature=config.confidence_temperature,
     )
 
-    # Load trainable policy
-    print(f"Loading policy from {config.adapter_path} ...")
-    policy_model = AutoPeftModelForCausalLM.from_pretrained(
-        config.adapter_path,
-        is_trainable=True,
-        device_map="auto",
-    )
-    tokenizer = AutoTokenizer.from_pretrained(config.adapter_path)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    policy_model.config.use_cache = False
+    if config.shared_base:
+        # ── Shared-base path: one quantised base, two named adapters ──────────
+        base_name = config.base_model_name
+        if base_name is None:
+            import json as _json
+            adapter_config_path = Path(config.adapter_path) / "adapter_config.json"
+            base_name = _json.loads(adapter_config_path.read_text()).get("base_model_name_or_path")
+            if not base_name:
+                raise ValueError(
+                    "Cannot infer base_model_name from adapter_config.json; "
+                    "pass --base-model-name explicitly."
+                )
+
+        print(f"Shared-base mode: loading {base_name} at 4-bit ...")
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4",
+        )
+        base_model = AutoModelForCausalLM.from_pretrained(
+            base_name,
+            quantization_config=bnb_config,
+            device_map="auto",
+        )
+        tokenizer = AutoTokenizer.from_pretrained(config.adapter_path)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+
+        print(f"  Mounting policy adapter from {config.adapter_path} ...")
+        policy_model = PeftModel.from_pretrained(
+            base_model, config.adapter_path, adapter_name="policy", is_trainable=True
+        )
+        print(f"  Mounting judge adapter from {judge_path} ...")
+        policy_model.load_adapter(judge_path, adapter_name="judge")
+        # Freeze judge adapter weights
+        for name, param in policy_model.named_parameters():
+            if "judge" in name:
+                param.requires_grad_(False)
+        policy_model.set_adapter("policy")
+        policy_model.config.use_cache = False
+
+        judge = FrozenJudge.from_shared_model(
+            model=policy_model,
+            tokenizer=tokenizer,
+            judge_adapter_name="judge",
+            policy_adapter_name="policy",
+            **_judge_kwargs,
+        )
+        print(f"  Peak VRAM budget: ~1× model + two LoRA sets (~420MB for 0.8B at 4-bit)")
+
+    else:
+        # ── Standalone path: separate model instances ─────────────────────────
+        print(f"Loading frozen judge from {judge_path} ...")
+        judge = FrozenJudge(adapter_path=judge_path, **_judge_kwargs)
+
+        print(f"Loading policy from {config.adapter_path} ...")
+        policy_model = AutoPeftModelForCausalLM.from_pretrained(
+            config.adapter_path,
+            is_trainable=True,
+            device_map="auto",
+        )
+        tokenizer = AutoTokenizer.from_pretrained(config.adapter_path)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        policy_model.config.use_cache = False
 
     # Build dataset
     records = load_jsonl(Path(config.dataset_path))

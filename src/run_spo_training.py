@@ -1,4 +1,4 @@
-"""Runnable SPO fine-tuning entrypoint for confidence-bearing reasoning outputs."""
+"""Runnable SPO fine-tuning entrypoint for structured reasoning outputs."""
 
 import json
 import re
@@ -28,7 +28,7 @@ class SPOTrainingConfig:
     """Runtime configuration for a concrete SPO training run."""
 
     adapter_path: str
-    dataset_path: str = "data/train_facts_with_confidence_967.jsonl"
+    dataset_path: str = "data/train_structured_967.jsonl"
     output_dir: str = "output/spo_training"
     model_name: str = "Qwen/Qwen3.5-0.8B"
     evaluation_metric: str = "triplet"
@@ -351,9 +351,9 @@ def run_spo_training(config: SPOTrainingConfig) -> dict:
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Run SPO fine-tuning on a confidence-bearing dataset")
+    parser = argparse.ArgumentParser(description="Run SPO fine-tuning on a structured reasoning dataset")
     parser.add_argument("--adapter-path", required=True, help="Starting PEFT adapter directory")
-    parser.add_argument("--dataset-path", default="data/train_facts_with_confidence_967.jsonl")
+    parser.add_argument("--dataset-path", default="data/train_structured_967.jsonl")
     parser.add_argument("--output-dir", default="output/spo_training")
     parser.add_argument("--model-name", default="Qwen/Qwen3.5-0.8B")
     parser.add_argument(

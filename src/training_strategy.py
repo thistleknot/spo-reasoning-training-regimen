@@ -120,14 +120,27 @@ class TrainingStrategy:
                     exit_criteria="Risk-coverage and syllogism quality improve over the base-only run.",
                 ),
                 CurriculumStage(
-                    name="optional-score-refinement",
-                    description="Later phase for replacing bootstrap confidence targets with judge or GRPO signals.",
+                    name="grpo-refinement",
+                    description=(
+                        "Online RL phase using a frozen copy of the SFT adapter as judge. "
+                        "For each quote, sample G completions from the live policy and score each "
+                        "with decomposed binary entailment probes plus K confidence samples. "
+                        "Group-relative advantage normalisation (GRPO) updates the policy toward "
+                        "high-reward completions. Patience-gated: stop when mean group reward "
+                        "plateaus for N consecutive epochs."
+                    ),
                     regimen_weights={
-                        RegimenName.FACTS_WITH_CONFIDENCE.value: 0.50,
-                        RegimenName.SYLLOGISM_WITH_CONFIDENCE.value: 0.50,
+                        RegimenName.BASE_REASONING.value: 1.0,
                     },
-                    objective="Refine score-bearing behaviors after the downstream evaluation harness exists.",
-                    exit_criteria="Only run if judge-derived or preference-derived labels become available.",
+                    objective=(
+                        "Replace heuristic SFT weighting with live frozen-judge reward. "
+                        "Teach the model to produce entailed premises that the frozen judge "
+                        "independently confirms, not just imitate the gold format."
+                    ),
+                    exit_criteria=(
+                        "Patience exhausted: mean group reward has not improved by "
+                        "patience_delta for patience consecutive epochs."
+                    ),
                 ),
             ],
             ablations=[
@@ -155,7 +168,7 @@ class TrainingStrategy:
                 ),
             ],
             evaluation=DownstreamEvaluationPlan(
-                primary_target="syllogism_quality",
+                primary_target="mean_group_reward",
                 judge_dimensions=[
                     "faithfulness_to_quote",
                     "entailed_coverage",
@@ -163,15 +176,15 @@ class TrainingStrategy:
                     "coherence_and_minimality",
                 ],
                 confidence_metrics=[
-                    "spearman",
-                    "pearson",
-                    "auroc",
-                    "brier",
-                    "ece",
-                    "risk_coverage",
+                    "conf_mean",
+                    "conf_std",
+                    "conf_signal",          # conf_mean * (1 - conf_std)
+                    "entailment_score",
+                    "non_entailment_score",
+                    "conclusion_score",
                 ],
-                selection_metric="risk_coverage",
-                acceptance_threshold=0.7,
+                selection_metric="mean_group_reward",
+                acceptance_threshold=0.6,
             ),
         )
 

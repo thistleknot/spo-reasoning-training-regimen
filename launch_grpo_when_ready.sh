@@ -63,12 +63,13 @@ $VENV generate_grpo_data.py \
 
 echo "[$(date)] Phase 1 complete. Rows: $(wc -l < "$GENERATED")"
 
-# Best-of-N SFT corpus: strict schema validation + best reward per quote
+# Best-of-N SFT corpus: strict schema validation + greedy diversity selection
 echo "[$(date)] Building best-of-N SFT corpus ..."
 $VENV build_sft_corpus.py \
     --input  "$GENERATED" \
     --output "$SFT_CORPUS" \
-    --top-k 1 \
+    --top-k 3 \
+    --diversity-alpha 0.15 \
     --min-reward 0.0 \
     --min-entailed 1 \
     --min-non-entailed 1

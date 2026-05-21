@@ -78,6 +78,12 @@ class GRPOConfig:
     confidence_weight: float = 0.0       # reward budget for conf signal (0 = disabled)
     confidence_temperature: float = 0.7
 
+    # Offline mode: path to precomputed (quote, completions, rewards) JSONL.
+    # When set, live generation and judge scoring are skipped — the trainer reads
+    # rewards directly from this file and only runs the policy gradient update.
+    # Produced by generate_grpo_data.py (phase 1 of the offline GRPO workflow).
+    precomputed_data_path: Optional[str] = None
+
     # Optimizer
     learning_rate: float = 1e-5
     beta: float = 0.1                          # KL penalty weight
@@ -132,6 +138,54 @@ def _quote_collator(batch: List[dict]) -> dict:
     return {
         "quotes": [item["quote"] for item in batch],
         "prompts": [item["prompt"] for item in batch],
+    }
+
+
+class PrecomputedGRPODataset(Dataset):
+    """Dataset for offline GRPO training using precomputed completions and rewards.
+
+    Reads the JSONL produced by generate_grpo_data.py — each record must contain:
+        quote:       original input text
+        prompt:      chat-format prompt string (already tokenized-friendly)
+        completions: list[str] — G sampled model outputs
+        rewards:     list[float] — parallel reward scores in [0.0, 1.0]
+
+    Records where all rewards are zero are kept in the dataset; dead-quote pruning
+    in run_epoch will handle them via streak tracking.
+
+    Preconditions:
+        records is non-empty; each record has quote, prompt, completions, rewards.
+    """
+
+    def __init__(self, records: List[dict]) -> None:
+        self.items: List[dict] = []
+        for rec in records:
+            quote = rec.get("quote", "").strip()
+            prompt = rec.get("prompt", "")
+            completions = rec.get("completions", [])
+            rewards = rec.get("rewards", [])
+            if not quote or not completions or len(completions) != len(rewards):
+                continue
+            self.items.append({
+                "quote": quote,
+                "prompt": prompt,
+                "completions": completions,
+                "rewards": rewards,
+            })
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def __getitem__(self, idx: int) -> dict:
+        return self.items[idx]
+
+
+def _precomputed_collator(batch: List[dict]) -> dict:
+    return {
+        "quotes": [item["quote"] for item in batch],
+        "prompts": [item["prompt"] for item in batch],
+        "completions": [item["completions"] for item in batch],
+        "rewards": [item["rewards"] for item in batch],
     }
 
 
@@ -311,8 +365,17 @@ class GRPOTrainer:
     ) -> Dict[str, float]:
         """Run one full GRPO epoch over the dataset.
 
+        Supports two batch modes, selected by what the dataloader yields:
+          Live mode (QuoteDataset):
+            batch has 'quotes' and 'prompts' — completions are sampled from
+            the policy and scored by the frozen judge on the fly.
+          Offline mode (PrecomputedGRPODataset):
+            batch has 'quotes', 'prompts', 'completions', and 'rewards' —
+            live sampling and judge scoring are skipped entirely.
+
         Returns:
-            dict with 'mean_reward', 'mean_advantage_std', 'steps', 'epoch'
+            dict with 'mean_reward', 'mean_advantage_std', 'steps', 'epoch',
+            'newly_pruned', 'total_dead_quotes'.
         """
         total_reward = 0.0
         total_adv_std = 0.0
@@ -323,15 +386,22 @@ class GRPOTrainer:
         for batch_idx, batch in enumerate(dataloader, start=1):
             quotes = batch["quotes"]
             prompts = batch["prompts"]
+            # Precomputed mode: completions and rewards come from the dataset
+            precomputed_completions = batch.get("completions")
+            precomputed_rewards = batch.get("rewards")
 
             batch_loss = torch.tensor(0.0, device=self.model.device)
-            for quote, prompt in zip(quotes, prompts):
+            for i, (quote, prompt) in enumerate(zip(quotes, prompts)):
                 # Skip quotes confirmed unproductive across multiple epochs
                 if quote in self.dead_quotes:
                     continue
 
-                completions = self.sample_group(prompt)
-                rewards = self.score_group(quote, completions)
+                if precomputed_completions is not None:
+                    completions = precomputed_completions[i]
+                    rewards = precomputed_rewards[i]
+                else:
+                    completions = self.sample_group(prompt)
+                    rewards = self.score_group(quote, completions)
 
                 # All-zero group: increment streak; prune after threshold
                 if max(rewards) == 0.0:
@@ -396,20 +466,27 @@ class GRPOTrainer:
 def run_grpo_training(config: GRPOConfig) -> dict:
     """Run the GRPO outer loop with patience-gated termination.
 
-    Supports two model-loading modes controlled by config.shared_base:
+    Supports three operating modes:
 
-    Standalone (default):
-        Loads separate model instances for policy and judge. Simple but uses
-        ~2× model VRAM.
+    Offline (config.precomputed_data_path is set):
+        Reads precomputed (quote, completions, rewards) JSONL produced by
+        generate_grpo_data.py. No judge is loaded; no live generation.
+        Policy model only — lowest possible VRAM (~460MB peak for 0.8B at 4-bit
+        during backward pass).
 
-    Shared-base (config.shared_base = True):
+    Shared-base live (config.shared_base = True):
         Loads the base model once (4-bit quantized), mounts policy and judge
         as two named PEFT adapters. Peak VRAM ≈ 1× model + two small LoRA
         weight sets. Required for sub-1B models targeting a 400MB budget.
 
+    Standalone live (default):
+        Loads separate model instances for policy and judge. Simple but uses
+        ~2× model VRAM.
+
     Preconditions:
         config.adapter_path exists and contains a PEFT adapter.
-        config.dataset_path exists and contains JSONL records with 'quote' or 'input_text'.
+        If offline mode: config.precomputed_data_path exists with valid JSONL.
+        Else: config.dataset_path exists with JSONL records (quote/input_text).
     Guarantee:
         Best checkpoint (highest mean reward) is saved to output_dir/adapter/.
         Training history is written to output_dir/grpo_history.jsonl.
@@ -432,7 +509,32 @@ def run_grpo_training(config: GRPOConfig) -> dict:
         confidence_temperature=config.confidence_temperature,
     )
 
-    if config.shared_base:
+    judge: Optional[FrozenJudge] = None
+
+    if config.precomputed_data_path:
+        # ── Offline path: policy only, no judge needed ────────────────────────
+        print(f"Offline GRPO mode: loading precomputed data from {config.precomputed_data_path}")
+        print(f"Loading policy from {config.adapter_path} (no judge — lowest VRAM) ...")
+        policy_model = AutoPeftModelForCausalLM.from_pretrained(
+            config.adapter_path,
+            is_trainable=True,
+            device_map="auto",
+        )
+        tokenizer = AutoTokenizer.from_pretrained(config.adapter_path)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        policy_model.config.use_cache = False
+
+        precomp_records = load_jsonl(Path(config.precomputed_data_path))
+        dataset = PrecomputedGRPODataset(precomp_records)
+        dataloader = DataLoader(
+            dataset,
+            batch_size=config.batch_size,
+            shuffle=True,
+            collate_fn=_precomputed_collator,
+        )
+
+    elif config.shared_base:
         # ── Shared-base path: one quantised base, two named adapters ──────────
         base_name = config.base_model_name
         if base_name is None:
@@ -483,6 +585,22 @@ def run_grpo_training(config: GRPOConfig) -> dict:
         )
         print(f"  Peak VRAM budget: ~1× model + two LoRA sets (~420MB for 0.8B at 4-bit)")
 
+        # Live dataset — quotes only; sampling happens inside run_epoch
+        records = load_jsonl(Path(config.dataset_path))
+        train_indices, _ = split_indices(len(records), config.holdout_fraction, config.seed)
+        train_records = (
+            records[: config.max_train_records]
+            if config.max_train_records
+            else subset_records(records, train_indices)
+        )
+        dataset = QuoteDataset(train_records, tokenizer, config.max_length)
+        dataloader = DataLoader(
+            dataset,
+            batch_size=config.batch_size,
+            shuffle=True,
+            collate_fn=_quote_collator,
+        )
+
     else:
         # ── Standalone path: separate model instances ─────────────────────────
         print(f"Loading frozen judge from {judge_path} ...")
@@ -499,22 +617,21 @@ def run_grpo_training(config: GRPOConfig) -> dict:
             tokenizer.pad_token = tokenizer.eos_token
         policy_model.config.use_cache = False
 
-    # Build dataset
-    records = load_jsonl(Path(config.dataset_path))
-    train_indices, _ = split_indices(len(records), config.holdout_fraction, config.seed)
-    train_records = (
-        records[: config.max_train_records]
-        if config.max_train_records
-        else subset_records(records, train_indices)
-    )
-
-    dataset = QuoteDataset(train_records, tokenizer, config.max_length)
-    dataloader = DataLoader(
-        dataset,
-        batch_size=config.batch_size,
-        shuffle=True,
-        collate_fn=_quote_collator,
-    )
+        # Live dataset — quotes only; sampling happens inside run_epoch
+        records = load_jsonl(Path(config.dataset_path))
+        train_indices, _ = split_indices(len(records), config.holdout_fraction, config.seed)
+        train_records = (
+            records[: config.max_train_records]
+            if config.max_train_records
+            else subset_records(records, train_indices)
+        )
+        dataset = QuoteDataset(train_records, tokenizer, config.max_length)
+        dataloader = DataLoader(
+            dataset,
+            batch_size=config.batch_size,
+            shuffle=True,
+            collate_fn=_quote_collator,
+        )
 
     optimizer = torch.optim.AdamW(
         (p for p in policy_model.parameters() if p.requires_grad),

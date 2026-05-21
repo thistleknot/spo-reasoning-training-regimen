@@ -1,12 +1,25 @@
 """CLI entrypoint for GRPO fine-tuning of SPO extraction models.
 
-Usage:
-    python run_grpo_training.py \
-        --adapter-path output/sft_adapter \
-        --dataset-path data/train_structured_967.jsonl \
-        --output-dir output/grpo_training \
-        --group-size 8 \
-        --patience 3
+Two operating modes:
+
+  Live mode (default):
+    python run_grpo_training.py \\
+        --adapter-path output/sft_adapter \\
+        --dataset-path data/train_structured_967.jsonl \\
+        --output-dir output/grpo_training \\
+        --group-size 8
+
+  Offline mode (phase 2 of two-phase workflow; lower peak VRAM during training):
+    # Phase 1: generate completions + rewards, inference only
+    python generate_grpo_data.py \\
+        --adapter-path output/sft_adapter \\
+        --output-path data/grpo_generated.jsonl
+
+    # Phase 2: train from precomputed data, no judge needed
+    python run_grpo_training.py \\
+        --adapter-path output/sft_adapter \\
+        --precomputed-data-path data/grpo_generated.jsonl \\
+        --output-dir output/grpo_training
 
 The judge defaults to the same adapter as the policy (frozen copy).
 Pass --judge-path to use a different checkpoint as the frozen judge.
@@ -159,6 +172,17 @@ def _build_parser():
         ),
     )
     parser.add_argument(
+        "--precomputed-data-path",
+        default=None,
+        help=(
+            "Path to precomputed JSONL from generate_grpo_data.py. "
+            "When set, live generation and judge scoring are skipped entirely — "
+            "the trainer reads (completions, rewards) from this file and only "
+            "runs the policy gradient update. Lowest possible training VRAM: "
+            "~460 MB peak for 0.8B at 4-bit (policy only, no judge loaded)."
+        ),
+    )
+    parser.add_argument(
         "--shared-base",
         action="store_true",
         default=False,
@@ -211,6 +235,7 @@ if __name__ == "__main__":
         dead_quote_streak_threshold=args.dead_quote_streak_threshold,
         shared_base=args.shared_base,
         base_model_name=args.base_model_name,
+        precomputed_data_path=args.precomputed_data_path,
     )
 
     result = run_grpo_training(config)

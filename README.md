@@ -481,9 +481,47 @@ These failure modes do not appear in the holdout metrics because the holdout set
 
 **Fix:** Run SPO for at least 2–3 epochs. Monitor the *variance* of per-step reward across training batches, not just the mean — if variance collapses early, the model has found a local optimum that scores well on template compliance but hasn't generalised. Manually run inference on 3–5 diverse held-out quotes (not from the training distribution) at the end of each epoch before declaring done.
 
+### 11. Confidence scores are only valid when the scorer is frozen and external to the policy
+
+Allowing the model being trained to assign confidence to its own outputs is circular: the model learns to output whatever confidence value maximises reward regardless of actual extraction quality. Early experiments showed the model converging to a bimodal strategy — outputting `confidence=0.4` or `confidence=0.6` almost exclusively — because those values happened to be over-represented in the synthetic training data. The model was optimising the label, not the reasoning.
+
+**Fix:** Never use confidence scores produced by the policy model as a training signal. Confidence is only meaningful when it comes from a frozen external judge — a model whose weights are not updated during the training run. The frozen copy sees the same vocabulary and structure as the policy but has no gradient incentive to inflate its scores.
+
+**Corollary:** Drop `confidence=X` annotations from the output format entirely. The model should learn to produce correct premises and a sound throughline; confidence quantification is a post-hoc evaluation concern, not a generation target.
+
+### 12. A single confidence probe is a point estimate — sample a distribution instead
+
+A single frozen-judge scoring pass returns one number. That number is subject to prompt sensitivity, temperature, and the judge's own uncertainty at the margin. A completion that scores 0.62 on one pass might score 0.48 on another; acting on the point estimate means training on noise.
+
+**Fix:** Generate K confidence ratings per completion from the frozen judge at temperature > 0. The resulting distribution yields two signals that a single pass cannot: (1) `conf_mean` — the judge's central estimate of quality, and (2) `conf_std` — the judge's uncertainty. High mean with low std means the judge consistently agrees this completion is good. High std means the completion sits at the quality margin and the reward signal should be discounted.
+
+The combined signal `conf_mean × (1 − conf_std)` simultaneously rewards quality and penalises uncertain assessments.
+
+### 13. Multi-level sampling multiplies the effective signal per quote
+
+GRPO operates on groups of G completions per quote. If each completion is scored by a single judge pass, you have G reward signals to normalise across. If each completion instead receives K confidence samples, the reward estimate for that completion is the mean of K draws — much lower variance — and the total information gathered per quote scales as G × K.
+
+In practice this means you can reduce G (fewer generations per quote, less VRAM) while keeping or improving signal quality by increasing K (more judge samples per completion, which is cheaper since it requires no gradient computation). The two dimensions are independently controllable.
+
+**Rule:** treat G and K as separate budget dials. G controls coverage across the output space for a given quote; K controls estimation quality per point in that space.
+
+### 14. Empty entailed premises must score zero, not neutral
+
+A completion with no entailed premises is not a borderline case — it is a complete extraction failure. The task is specifically to derive premises from memorable quotes; any non-blank quote has derivable premises by definition. Scoring empty-entailed completions at 0.5 (neutral) allows the model to learn that producing nothing is safe, which is the opposite of the intended incentive.
+
+**Fix:** Return 0.0 immediately when the entailed premises list is empty, regardless of what the non-entailed or conclusion sections contain. Apply the same logic to the conclusion coherence probe: an empty premise list as input makes the coherence question undefined, not neutral.
+
+**Data filter corollary:** Do not filter training quotes based on whether the gold output has entailed premises — that would remove hard quotes and make the training distribution easier than inference. Instead, filter on whether the *input quote* is blank. Any non-blank quote should be trained on; the model must learn to extract premises even from difficult inputs.
+
+### 15. Confirm unproductive quotes are consistently unproductive before pruning
+
+A single all-zero reward group for a quote might be a bad generation day — the model can fail to extract on any given forward pass. Pruning the quote immediately discards potentially useful training signal. Conversely, allowing the model to waste G × K inference passes on quotes that will never produce entailed premises wastes compute each epoch.
+
+**Fix:** Track a consecutive zero-group streak per quote across epochs. Only add the quote to the dead set after it has produced all-zero groups for K consecutive epochs. A single recovery epoch resets the streak. This ensures pruning is consensus-based (multiple independent generation attempts) rather than single-sample noise.
+
 ### Takeaway
 
-For any RL-from-feedback training loop: (1) generation controls must prevent degenerate outputs before rewards are ever computed, (2) reward functions must explicitly penalise known failure modes rather than only rewarding the ideal case, (3) reward signals computed from gold data are always suspect — check that the distribution of rewards across your training set actually varies before assuming SPO is doing anything useful, (4) offline preference optimisation cannot correct a habit the model has never been penalised for producing — if the failure mode is a specific generated token sequence, only online generation-and-penalise RL can reliably fix it, (5) for small models, multi-regimen training on semantically overlapping formats requires stratified sampling across (regimen × prompt-length) strata — without it, whichever regimen dominates the data mix will corrupt the shared header vocabulary for the other regimens, (6) post-training evaluation scripts must mirror the exact prompt-format pipeline used during training — a chat-template mismatch produces NO_HEADER silently, (7) `repetition_penalty` corrupts structured headers whenever those headers appear verbatim in the prompt instruction list — use `no_repeat_ngram_size=6` instead, (8) eval pipeline generation params must be identical to inference params — a README fix that never propagates to the eval script produces `avg_quality=0.0` silently, (9) one epoch of SPO is not enough for quality generalisation — validate on out-of-distribution inputs at each epoch boundary, not just on holdout metrics.
+For any RL-from-feedback training loop: (1) generation controls must prevent degenerate outputs before rewards are ever computed, (2) reward functions must explicitly penalise known failure modes rather than only rewarding the ideal case, (3) reward signals computed from gold data are always suspect — check that the distribution of rewards across your training set actually varies before assuming SPO is doing anything useful, (4) offline preference optimisation cannot correct a habit the model has never been penalised for producing — if the failure mode is a specific generated token sequence, only online generation-and-penalise RL can reliably fix it, (5) for small models, multi-regimen training on semantically overlapping formats requires stratified sampling across (regimen × prompt-length) strata — without it, whichever regimen dominates the data mix will corrupt the shared header vocabulary for the other regimens, (6) post-training evaluation scripts must mirror the exact prompt-format pipeline used during training — a chat-template mismatch produces NO_HEADER silently, (7) `repetition_penalty` corrupts structured headers whenever those headers appear verbatim in the prompt instruction list — use `no_repeat_ngram_size=6` instead, (8) eval pipeline generation params must be identical to inference params — a README fix that never propagates to the eval script produces `avg_quality=0.0` silently, (9) one epoch of SPO is not enough for quality generalisation — validate on out-of-distribution inputs at each epoch boundary, not just on holdout metrics, (10) confidence scores must come from a frozen external judge — never from the policy being trained, (11) sample a distribution of K confidence scores per completion rather than a single probe — the mean and std together provide a richer signal than any point estimate, (12) G (completions per quote) and K (confidence samples per completion) are independent budget dials — reduce G and increase K to improve signal quality at fixed compute.
 
 ---
 

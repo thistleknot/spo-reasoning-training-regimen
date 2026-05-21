@@ -203,16 +203,12 @@ class SPOTrainer:
     def extract_confidence(self, output: str) -> float:
         """Extract confidence score from model output.
 
-        Looks for either triplet confidence annotations (`confidence=0.8`) or an
-        explicit `Confidence:` section in score-bearing outputs.
+        .. deprecated::
+            Confidence annotations are no longer part of the SPO output format.
+            This method is kept for backward compatibility only and will be removed
+            in a future version. Returns 0.0 for all inputs.
         """
-        matches = re.findall(r"confidence\s*=\s*([0-9]*\.?[0-9]+)", output)
-        if matches:
-            # Return average confidence
-            return sum(float(m) for m in matches) / len(matches)
-
-        section_match = re.search(
-            r"Confidence:\s*(?:\n\s*)?([0-9]*\.?[0-9]+)",
+        return 0.0
             output,
             flags=re.IGNORECASE,
         )
@@ -461,10 +457,9 @@ class SPOEvaluator:
         """Evaluate correctness of triplet-based output.
 
         Scores based on:
-        - Triplet format preservation (subject | relation | object) [0.20 weight]
+        - Triplet format preservation (subject | relation | object) [0.25 weight]
         - Section header correctness against contract or CANONICAL_HEADERS [0.30 weight]
-        - Confidence score presence [0.15 weight]
-        - Evidence tag correctness (observed vs inferred) [0.15 weight]
+        - Evidence tag correctness (observed vs inferred) [0.25 weight]
         - Uniqueness ratio: hard-zero if > half the triplet lines are duplicates [gate]
         - Tautology penalty: subject appears in object field [0.05 weight]
         - Trivial-predicate penalty: bare copula ('is'/'are'/…) as sole predicate [0.05 weight]
@@ -494,9 +489,9 @@ class SPOEvaluator:
 
         score = 0.0
 
-        # Triplet format check [0.20]
+        # Triplet format check [0.25]
         if triplet_lines:
-            score += 0.20
+            score += 0.25
 
         # Section header correctness [0.30] — use contract when provided, else CANONICAL_HEADERS
         if contract is not None:
@@ -504,13 +499,9 @@ class SPOEvaluator:
         else:
             score += 0.30 * SPOEvaluator._header_score(model_output)
 
-        # Confidence annotation [0.15]
-        if re.search(r"confidence=", model_output):
-            score += 0.15
-
-        # Evidence tags [0.15]
+        # Evidence tags [0.25]
         if re.search(r"\b(observed|inferred)\b", model_output):
-            score += 0.15
+            score += 0.25
 
         # Tautology penalty: subject appears as a substring of the object field,
         # e.g. "the speaker | is ... | is the speaker" or "x | is | x itself" [0.05]

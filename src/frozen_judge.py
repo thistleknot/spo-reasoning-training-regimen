@@ -157,10 +157,35 @@ class FrozenJudge:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
+        # Use 4-bit quantization only when CUDA has sufficient free VRAM;
+        # otherwise fall back to bfloat16 on CPU (BnB 4-bit is CUDA-only).
+        _device = device or ("auto" if torch.cuda.is_available() else "cpu")
+        _extra: dict = {}
+        if torch.cuda.is_available():
+            try:
+                from transformers import BitsAndBytesConfig as _BnB
+                _free = (
+                    torch.cuda.mem_get_info(0)[0]
+                ) / 1024 / 1024
+                if _free >= 450:
+                    _extra["quantization_config"] = _BnB(
+                        load_in_4bit=True,
+                        bnb_4bit_compute_dtype=torch.bfloat16,
+                        bnb_4bit_use_double_quant=True,
+                        bnb_4bit_quant_type="nf4",
+                    )
+                else:
+                    _extra["torch_dtype"] = torch.bfloat16
+            except Exception:
+                _extra["torch_dtype"] = torch.bfloat16
+        else:
+            _extra["torch_dtype"] = torch.bfloat16
+
         self.model = AutoPeftModelForCausalLM.from_pretrained(
             adapter_path,
             is_trainable=False,
-            device_map=device or "auto",
+            device_map=_device,
+            **_extra,
         )
         self.model.eval()
         for param in self.model.parameters():

@@ -40,12 +40,51 @@ from pathlib import Path
 
 import torch
 from peft import AutoPeftModelForCausalLM
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, BitsAndBytesConfig
 
 from src.frozen_judge import FrozenJudge
 from src.run_ablation_matrix import load_jsonl
 from src.serialize_training_format import build_base_reasoning_prompt
 from src.chat_format import build_generation_prompt, strip_response_preamble
+
+
+def _free_vram_mb() -> float:
+    """Return free VRAM in MB across all processes, or 0 if CUDA is unavailable.
+
+    Uses mem_get_info() which reports device-level free memory (not just the
+    current process), unlike memory_reserved() which only tracks this process.
+    """
+    if not torch.cuda.is_available():
+        return 0.0
+    free_bytes, _ = torch.cuda.mem_get_info(0)
+    return free_bytes / 1024 / 1024
+
+
+def _bnb_config_if_cuda() -> dict:
+    """Return BitsAndBytesConfig kwargs when CUDA has enough headroom, else empty dict.
+
+    4-bit quantization is CUDA-only. When running on CPU or when GPU VRAM is
+    tight, we fall back to bfloat16 (~1.6 GB for 0.8B) which fits comfortably
+    in system RAM.
+    """
+    # Need ~460 MB free for 4-bit 0.8B + KV cache during generation
+    if _free_vram_mb() >= 450:
+        return {
+            "quantization_config": BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_quant_type="nf4",
+            ),
+        }
+    return {"torch_dtype": torch.bfloat16}
+
+
+def _device_map() -> str:
+    """Return device_map value: 'auto' only when GPU has enough free VRAM, else 'cpu'."""
+    if not torch.cuda.is_available():
+        return "cpu"
+    return "auto" if _free_vram_mb() >= 450 else "cpu"
 
 
 def _load_done_quotes(output_path: Path) -> set:
@@ -136,9 +175,12 @@ def generate_grpo_data(args: argparse.Namespace) -> None:
     torch.manual_seed(args.seed)
 
     # Load model(s)
+    free_mb = _free_vram_mb()
+    print(f"GPU free VRAM: {free_mb:.0f} MB — {'4-bit on GPU' if free_mb >= 450 else 'bfloat16 on CPU (GPU full)'}")
+
     if args.shared_base:
         from peft import PeftModel
-        from transformers import AutoModelForCausalLM, BitsAndBytesConfig
+        from transformers import AutoModelForCausalLM
 
         base_name = args.base_model_name
         if base_name is None:
@@ -150,15 +192,9 @@ def generate_grpo_data(args: argparse.Namespace) -> None:
                     "pass --base-model-name explicitly."
                 )
 
-        print(f"Shared-base mode: loading {base_name} at 4-bit ...")
-        bnb_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_compute_dtype=torch.bfloat16,
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_quant_type="nf4",
-        )
+        print(f"Shared-base mode: loading {base_name} ...")
         base_model = AutoModelForCausalLM.from_pretrained(
-            base_name, quantization_config=bnb_config, device_map="auto"
+            base_name, device_map=_device_map(), **_bnb_config_if_cuda()
         )
         tokenizer = AutoTokenizer.from_pretrained(args.adapter_path)
         if tokenizer.pad_token is None:
@@ -185,17 +221,15 @@ def generate_grpo_data(args: argparse.Namespace) -> None:
             confidence_weight=args.confidence_weight,
             confidence_temperature=args.confidence_temperature,
         )
-        print("  Peak VRAM budget: ~420 MB for 0.8B at 4-bit (shared-base mode)")
 
     elif same_judge:
-        # Same model for generation and scoring — single load, lowest VRAM
-        print(f"Same-judge mode: loading {args.adapter_path} at 4-bit (single model) ...")
+        # Single model used for both generation and scoring — lowest memory mode
+        print(f"Same-judge mode: loading {args.adapter_path} ...")
         policy_model = AutoPeftModelForCausalLM.from_pretrained(
             args.adapter_path,
             is_trainable=False,
-            device_map="auto",
-            torch_dtype=torch.bfloat16,
-            load_in_4bit=True,
+            device_map=_device_map(),
+            **_bnb_config_if_cuda(),
         )
         tokenizer = AutoTokenizer.from_pretrained(args.adapter_path)
         if tokenizer.pad_token is None:
@@ -214,13 +248,15 @@ def generate_grpo_data(args: argparse.Namespace) -> None:
         # Reuse the already-loaded model to avoid a second load
         judge.model = policy_model
         judge.tokenizer = tokenizer
-        print("  Peak VRAM budget: ~460 MB for 0.8B (single model, same-judge mode)")
 
     else:
-        # Standalone: separate policy and judge — ~800 MB, not budget-friendly
+        # Standalone: separate policy and judge
         print(f"Standalone mode: loading policy from {args.adapter_path} ...")
         policy_model = AutoPeftModelForCausalLM.from_pretrained(
-            args.adapter_path, is_trainable=False, device_map="auto"
+            args.adapter_path,
+            is_trainable=False,
+            device_map=_device_map(),
+            **_bnb_config_if_cuda(),
         )
         tokenizer = AutoTokenizer.from_pretrained(args.adapter_path)
         if tokenizer.pad_token is None:
@@ -237,7 +273,6 @@ def generate_grpo_data(args: argparse.Namespace) -> None:
             confidence_weight=args.confidence_weight,
             confidence_temperature=args.confidence_temperature,
         )
-        print("  Peak VRAM budget: ~800 MB (standalone mode — two model instances)")
 
     # Load dataset
     records = load_jsonl(Path(args.dataset_path))

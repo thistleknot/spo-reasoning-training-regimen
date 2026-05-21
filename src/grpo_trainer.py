@@ -476,7 +476,7 @@ def run_grpo_training(config: GRPOConfig) -> dict:
 
     Shared-base live (config.shared_base = True):
         Loads the base model once (4-bit quantized), mounts policy and judge
-        as two named PEFT adapters. Peak VRAM ≈ 1× model + two small LoRA
+        as two named QLoRA adapters. Peak VRAM ≈ 1× quantized base + two small LoRA
         weight sets. Required for sub-1B models targeting a 400MB budget.
 
     Standalone live (default):
@@ -583,7 +583,7 @@ def run_grpo_training(config: GRPOConfig) -> dict:
             policy_adapter_name="policy",
             **_judge_kwargs,
         )
-        print(f"  Peak VRAM budget: ~1× model + two LoRA sets (~420MB for 0.8B at 4-bit)")
+        print(f"  Peak VRAM budget: ~1× 4-bit base + two QLoRA adapter weight sets (~420MB for 0.8B)")
 
         # Live dataset — quotes only; sampling happens inside run_epoch
         records = load_jsonl(Path(config.dataset_path))

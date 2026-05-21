@@ -10,7 +10,7 @@ VRAM budget (for 0.8B model at 4-bit nf4 + double quantization):
     Peak: ~460 MB (model weights + KV cache during generation).
   Shared-base mode (--shared-base):
     Base loaded once, policy + judge as named PEFT adapters.
-    Peak: ~420 MB (base + 2× LoRA sets).
+    Peak: ~420 MB (4-bit base + 2× QLoRA adapter weight sets).
   Standalone mode (explicit --judge-path pointing to different checkpoint):
     Two separate model instances.
     Peak: ~800 MB — avoid on tight budgets.

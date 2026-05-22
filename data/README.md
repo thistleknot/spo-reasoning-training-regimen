@@ -162,8 +162,8 @@ This is reversible and enables:
 ## See Also
 
 - **`../README.md`** — Usage guide and architecture
-- **`../docs/FORMAT_SPECIFICATION.md`** — Complete format spec
-- **`../docs/ARCHITECTURE_CONFIGURABLE_FORMAT.md`** — Design principles
+- **`../docs/format/README.md`** — Complete format spec
+- **`../docs/architecture/README.md`** — Design principles
 - **`../src/synthetic_generator.py`** — Generation implementation
 
 ## Next Steps

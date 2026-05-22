@@ -434,28 +434,47 @@ One of the prior pain points was making generation-model and inference-model set
 
 ```text
 spo-reasoning-training-regimen/
-├── src/
+├── src/                              # library modules (import targets)
+│   ├── run_spo_training.py           # SPO training entrypoint
+│   ├── spo_trainer.py
+│   ├── frozen_judge.py               # batch-scoring reward model
+│   ├── grpo_trainer.py
 │   ├── synthetic_generator.py
 │   ├── build_training_regimens.py
 │   ├── training_strategy.py
 │   ├── evaluate_regimens.py
-│   ├── spo_trainer.py
-│   ├── pipeline.py
-│   ├── training_config.py
-│   ├── graph_ontology.py
+│   ├── run_ablation_matrix.py
+│   ├── serialize_training_format.py
+│   ├── chat_format.py
 │   └── ...
+├── scripts/                          # pipeline runners (call from repo root)
+│   ├── generate_grpo_data.py         # Phase 1: quote → K completions
+│   ├── build_sft_corpus.py           # Phase 1→2: best-of-N selection
+│   ├── benchmark_training.py         # GPU batch-size benchmark
+│   ├── gen_seeing_is_believing.py    # holdout before/after inference
+│   ├── run_grpo_training.py
+│   ├── prep_full_corpus.py
+│   ├── generate_layered.py           # v2 two-stage generation (design)
+│   ├── post_gen_pipeline.sh          # unattended full pipeline
+│   ├── launch_grpo_when_ready.sh
+│   ├── run_v15_pipeline.sh           # historical regimen runners
+│   └── watch_and_build.sh
 ├── docs/
 │   ├── generation/README.md
 │   ├── training/README.md
 │   ├── inference/README.md
 │   ├── format/README.md
 │   ├── architecture/README.md
-│   └── quickstart/README.md
-└── data/
-    ├── sample_quotes.txt
-    ├── examples_training_format.jsonl
-    ├── SEEING_IS_BELIEVING_EXAMPLES.md
-    └── train_clean_for_model_967.jsonl
+│   ├── quickstart/README.md
+│   └── history/                      # prior-version review artifacts
+├── data/
+│   ├── train_best_of_n.jsonl         # 6921-row best-of-N SFT corpus
+│   ├── grpo_generated.jsonl          # 2366×8 raw generation output
+│   ├── train_structured_967.jsonl    # original 967-quote corpus
+│   ├── SEEING_IS_BELIEVING_EXAMPLES.md  # before/after holdout outputs
+│   ├── benchmark_training_results.json
+│   └── sample_quotes.txt
+└── tests/
 ```
 
 ## Seeing-is-believing artifacts

@@ -157,6 +157,13 @@ reward-filtered, diversity-selected demonstrations.
 - Holdout correctness: **0.945**
 - Adapter: `output/spo_best_of_n/adapter`
 
+**Downstream model outputs — holdout inference:**  
+[`data/SEEING_IS_BELIEVING_EXAMPLES.md`](data/SEEING_IS_BELIEVING_EXAMPLES.md) contains
+real before/after outputs: 15 holdout quotes (unseen during training) run through both
+the original adapter and the SPO-trained adapter. The before model shows formatting noise
+(garbled predicate casing, inconsistent structure); the after model produces clean,
+structurally consistent premise sets and throughlines.
+
 ### Two-stage layered generation (v2, future)
 
 The current pipeline is a single expansion pass (quote → K completions). A planned
@@ -457,7 +464,7 @@ If you want to inspect the output shape before generating anything, start here:
 
 | Artifact | Why it matters |
 |---|---|
-| `data/SEEING_IS_BELIEVING_EXAMPLES.md` | Human-readable examples of quote -> structured reasoning |
+| `data/SEEING_IS_BELIEVING_EXAMPLES.md` | **Before/after inference comparisons** — 15 holdout quotes run through the original adapter and the SPO best-of-N adapter. Shows real model output quality improvement. |
 | `data/examples_training_format.jsonl` | The same examples in training-ready JSONL |
 | `data/sample_quotes.txt` | Easy starter input set |
 | `data/train_clean_for_model_967.jsonl` | Larger cleaned training corpus used in prior work |

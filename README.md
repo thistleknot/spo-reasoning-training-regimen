@@ -71,48 +71,51 @@ That path creates template-backed examples immediately. If you want model-backed
 One holdout quote run through the original adapter and the SPO-trained adapter.
 Full set (15 quotes): [`data/SEEING_IS_BELIEVING_EXAMPLES.md`](data/SEEING_IS_BELIEVING_EXAMPLES.md).
 
-> *"Imagine smiling after a slap in the face. Then think of doing it twenty-four hours a day."*
+> *"The truth." Dumbledore sighed. "It is a beautiful and terrible thing, and should therefore be treated with great caution."*
 
-*(holdout reward: 0.619)*
+*(holdout reward: 0.750)*
 
 **Before** (original adapter):
 ```
 Non-Entailed Premises:
-slap in the face | is (observed) | an event
-smiling | is (observed, implied) | a positive emotion
-doing it twenty-four hours a daily | is (observed/implies) | a routine
+Dumbledore | is (observed) | sighed
+Dumbledore | is a wizard | is (observed, inferred) | true
+The truth | is (observed). | is (observed): true
+The truth | should be (observed). | should be (obsERVED): true
+The truth is (observed).| is (observed): beautiful
+The truth is (oberved).| is (oberved): terrible
 
 Entailed Premises:
-doing it twenty-four hours daily | is (inferred) | a way to maintain the positive emotion
-slap in the faces | is (inferred, implied) | a source of the positive emotion
-smiling | is an action | is (observed/implied) | taken after a slap in the faces
-slap in the facing | is (observed/inferred) | a slap in the face
-doing it twenty-four days a day | is (inferred/implies) | the same positive emotion
-slap | is (observed/facts) | a slap in a face
+Dumbledore | is (inferred) | treats the truth with great caution
+Dumbledore | is in (observed) | a state of being
+Dumbledore | is aware of (observed) | the nature of the truth
+Dumbledore | is concerned about (observed) | whether the truth is beautiful or terrible
+Dumbledore | is considering (observed) | if the truth is beautiful or not
+Dumbledore | is evaluating (observed) | two distinct attributes of the truth
+D Dumbledore | is considering (obsERVED) | the potential for the truth to be beautiful
+Dumbledore | is assessing (observed) | potential negative attributes of the truth
 
 Throughline:
-Maintaining a positive emotional state through a daily routine of self-correction
-(smiling after a slap) is a sustainable strategy.
+Dumbledore evaluates the truth as a complex entity that possesses both positive and
+negative attributes, necessitating a cautious approach to its treatment.
 ```
 
 **After** (SPO best-of-N adapter):
 ```
 Non-Entailed Premises:
-slap in the face | is (observed) | an event
-smiling after a slap in the faces | is (observed) | a reaction
-doing it twenty-four hours a daily | is (observed) | a habit
+Dumbledore | is (observed) | sighed
+Dumbledore | is a wizard | is (observed, inferred) | true
 
 Entailed Premises:
-doing it twenty-four hours daily | is (inferred) | implies a daily routine
-smiling after a slip in the face | is an example of doing it twenty-four times a day
-slap in the faces | is an example of smiling after a slip in the faces
-smiling after a slp in the face | is a form of doing it twenty-four a day
+The truth | is (inferred) | a beautiful thing
+The truth | is a terrible thing
+The truth | should be treated with great caution
 
 Throughline:
-Smiling after a slap in a face is a daily habit.
+The truth is a beautiful and terrible phenomenon that requires careful handling.
 ```
 
-*Before: 6 entailed premises with garbled subject echoes ("slap in the faces", "slap in the facing"), bloated throughline. After: cleaner subject reference, tighter throughline.*
+*Before: 11 entailed premises, all Dumbledore-centric, garbled casing (obsERVED/oberved), throughline off-subject. After: 3 clean truth-centric premises, correct evidence tags, one-sentence throughline on the right subject.*
 
 ## Repo map
 

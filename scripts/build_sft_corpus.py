@@ -66,6 +66,80 @@ _SECTION_RE = re.compile(
 )
 _TRIPLET_RE = re.compile(r"([^|]+)\s*\|\s*([^|]+)\s*\|\s*([^|]+)")
 
+# ------------------------------------------------------------------
+# Semantic noise detection
+# ------------------------------------------------------------------
+
+# Narrative action verbs that carry no semantic content when used as
+# the sole object of a triplet (e.g. "Dumbledore | is (observed) | sighed").
+_NARRATIVE_VERBS = frozenset(
+    "sighed wept turned stated said sidled lived died cried laughed smiled "
+    "walked ran stood sat looked watched asked answered replied whispered shouted "
+    "interrupted warned told showed pointed nodded shook breathed waited left came "
+    "went saw heard felt knew thought believed understood realized noticed".split()
+)
+
+# Meta-commentary predicates: object describes the act of saying, not the idea.
+_META_OBJECT_RE = re.compile(
+    r"^\s*(?:stated(?: that)?|described as|characterized by|defined as|"
+    r"known as|referred to as|called)\b",
+    re.IGNORECASE,
+)
+
+# Bare narrative-verb object: object is a single past-tense verb with optional
+# short trailing phrase (≤3 words), e.g. "sighed" or "turned back to Snape".
+_BARE_VERB_OBJ_RE = re.compile(
+    r"^\s*(" + "|".join(_NARRATIVE_VERBS) + r")\b(?:\s+\w+){0,3}\s*$",
+    re.IGNORECASE,
+)
+
+
+def _triplet_is_semantic_noise(line: str) -> bool:
+    """Return True when a triplet line carries no semantic content.
+
+    Detects three failure modes:
+    - Circular: subject appears verbatim as substring of object.
+    - Bare narrative verb: object is a narrative action (sighed, said, …)
+      with no additional semantic payload.
+    - Meta-commentary: object starts with a reporting verb (stated that,
+      described as, …) that narrates rather than reasons.
+
+    Require: line is a non-empty string containing at least two '|' separators.
+    Guarantee: returns False (not noise) for malformed lines with < 3 parts.
+    """
+    parts = [p.strip() for p in line.split("|")]
+    if len(parts) < 3:
+        return False
+
+    subject = re.sub(r"\(.*?\)", "", parts[0]).strip().lower()
+    obj_raw = re.sub(r"\(.*?\)", "", parts[2]).strip()
+    obj_lower = obj_raw.lower()
+
+    # Circular: subject is a non-trivial substring of the object
+    if len(subject) >= 8 and subject in obj_lower:
+        return True
+
+    # Bare narrative verb as object
+    if _BARE_VERB_OBJ_RE.match(obj_raw):
+        return True
+
+    # Meta-commentary object
+    if _META_OBJECT_RE.match(obj_raw):
+        return True
+
+    return False
+
+
+def semantic_clean_ratio(triplets: list[str]) -> float:
+    """Fraction of triplet lines that are semantically meaningful.
+
+    Returns 1.0 for empty lists (no triplets → not a semantic noise problem).
+    """
+    if not triplets:
+        return 1.0
+    clean = sum(1 for t in triplets if not _triplet_is_semantic_noise(t))
+    return clean / len(triplets)
+
 
 def _extract_sections(text: str) -> tuple[list[str], list[str], str]:
     """Return (non_entailed_triplets, entailed_triplets, conclusion_text)."""
@@ -224,11 +298,14 @@ def validate_completion(
     completion: str,
     min_entailed: int = 1,
     min_non_entailed: int = 1,
+    min_semantic_ratio: float = 0.70,
 ) -> bool:
-    """Non-negotiable structural gate.
+    """Non-negotiable structural and semantic gate.
 
     Require: completion is a non-empty string.
-    Guarantee: True only when all three sections are present and populated.
+    Guarantee: True only when all three sections are present and populated,
+    and at least min_semantic_ratio of all triplet lines are semantically
+    meaningful (not circular, bare-verb, or meta-commentary).
     """
     if not completion or not completion.strip():
         return False
@@ -238,6 +315,9 @@ def validate_completion(
     if len(non_ent) < min_non_entailed:
         return False
     if not conclusion:
+        return False
+    all_triplets = non_ent + ent
+    if semantic_clean_ratio(all_triplets) < min_semantic_ratio:
         return False
     return True
 
@@ -254,6 +334,7 @@ def build_sft_corpus(
     min_entailed: int = 1,
     min_non_entailed: int = 1,
     diversity_alpha: float = 0.15,
+    min_semantic_ratio: float = 0.70,
 ) -> dict:
     """Read generated JSONL, filter, select best-of-N, write SFT JSONL.
 
@@ -266,12 +347,17 @@ def build_sft_corpus(
     in the completion's triplet text.  Only used for ranking; stored reward
     is the raw score.
 
+    Semantic gate: any completion where fewer than min_semantic_ratio of its
+    triplet lines are semantically meaningful (circular, bare-verb object, or
+    meta-commentary detected) is rejected before selection.
+
     Returns a stats dict for reporting.
     """
     n_quotes_in = 0
     n_completions_in = 0
     n_failed_schema = 0
     n_failed_reward = 0
+    n_failed_semantic = 0
     n_quotes_out = 0
     n_rows_written = 0
     total_groundedness = 0.0
@@ -309,7 +395,13 @@ def build_sft_corpus(
                 if raw_rew <= min_reward:
                     n_failed_reward += 1
                     continue
-                if not validate_completion(comp, min_entailed, min_non_entailed):
+                # Structural + semantic validation (semantic gate baked into validate_completion)
+                ne_pre, ent_pre, _ = _extract_sections(comp)
+                all_pre = ne_pre + ent_pre
+                if all_pre and semantic_clean_ratio(all_pre) < min_semantic_ratio:
+                    n_failed_semantic += 1
+                    continue
+                if not validate_completion(comp, min_entailed, min_non_entailed, min_semantic_ratio):
                     n_failed_schema += 1
                     continue
                 ne, ent, conc = _extract_sections(comp)
@@ -347,6 +439,7 @@ def build_sft_corpus(
         "completions_in": n_completions_in,
         "failed_schema": n_failed_schema,
         "failed_reward": n_failed_reward,
+        "failed_semantic": n_failed_semantic,
         "quotes_out": n_quotes_out,
         "rows_written": n_rows_written,
         "coverage_pct": round(100 * n_quotes_out / max(n_quotes_in, 1), 1),
@@ -357,7 +450,7 @@ def build_sft_corpus(
 
 
 def main():
-    repo = Path(__file__).parent
+    repo = Path(__file__).resolve().parent.parent
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--input",
@@ -399,6 +492,16 @@ def main():
         default=1,
         help="Min non-entailed triplets required (default 1)",
     )
+    parser.add_argument(
+        "--min-semantic-ratio",
+        type=float,
+        default=0.70,
+        help=(
+            "Reject completions where fewer than this fraction of triplets are "
+            "semantically meaningful (circular, bare-verb, or meta-commentary "
+            "triplets are flagged as noise; default 0.70)"
+        ),
+    )
     args = parser.parse_args()
 
     input_path = Path(args.input)
@@ -410,7 +513,7 @@ def main():
 
     print(f"Reading: {input_path}")
     print(f"  top_k={args.top_k}  diversity_alpha={args.diversity_alpha}  "
-          f"min_reward={args.min_reward}")
+          f"min_reward={args.min_reward}  min_semantic_ratio={args.min_semantic_ratio}")
     stats = build_sft_corpus(
         input_path,
         output_path,
@@ -419,12 +522,14 @@ def main():
         min_entailed=args.min_entailed,
         min_non_entailed=args.min_non_entailed,
         diversity_alpha=args.diversity_alpha,
+        min_semantic_ratio=args.min_semantic_ratio,
     )
 
     print(f"\nCorpus build complete → {output_path}")
     print(f"  Quotes in:          {stats['quotes_in']}")
     print(f"  Completions in:     {stats['completions_in']}")
     print(f"  Failed schema:      {stats['failed_schema']}")
+    print(f"  Failed semantic:    {stats['failed_semantic']}")
     print(f"  Failed min_reward:  {stats['failed_reward']}")
     print(f"  Quotes surviving:   {stats['quotes_out']} ({stats['coverage_pct']}%)")
     print(f"  Rows written:       {stats['rows_written']}")

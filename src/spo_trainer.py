@@ -12,6 +12,47 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
 
+# ------------------------------------------------------------------
+# Semantic noise detection (shared with scripts/build_sft_corpus.py)
+# ------------------------------------------------------------------
+
+_NARRATIVE_VERBS_SPO = frozenset(
+    "sighed wept turned stated said sidled lived died cried laughed smiled "
+    "walked ran stood sat looked watched asked answered replied whispered shouted "
+    "interrupted warned told showed pointed nodded shook breathed waited left came "
+    "went saw heard felt knew thought believed understood realized noticed".split()
+)
+_META_OBJECT_RE_SPO = re.compile(
+    r"^\s*(?:stated(?: that)?|described as|characterized by|defined as|"
+    r"known as|referred to as|called)\b",
+    re.IGNORECASE,
+)
+_BARE_VERB_OBJ_RE_SPO = re.compile(
+    r"^\s*(" + "|".join(_NARRATIVE_VERBS_SPO) + r")\b(?:\s+\w+){0,3}\s*$",
+    re.IGNORECASE,
+)
+
+
+def _triplet_is_semantic_noise_spo(line: str) -> bool:
+    """Return True when a triplet line carries no semantic content.
+
+    Mirrors build_sft_corpus._triplet_is_semantic_noise; kept local to avoid
+    cross-package imports at training time.
+    """
+    parts = [p.strip() for p in line.split("|")]
+    if len(parts) < 3:
+        return False
+    subject = re.sub(r"\(.*?\)", "", parts[0]).strip().lower()
+    obj_raw = re.sub(r"\(.*?\)", "", parts[2]).strip()
+    obj_lower = obj_raw.lower()
+    if len(subject) >= 8 and subject in obj_lower:
+        return True
+    if _BARE_VERB_OBJ_RE_SPO.match(obj_raw):
+        return True
+    if _META_OBJECT_RE_SPO.match(obj_raw):
+        return True
+    return False
+
 
 @dataclass
 class SPOReward:
@@ -457,6 +498,8 @@ class SPOEvaluator:
         - Tautology penalty: subject appears in object field [0.05 weight]
         - Trivial-predicate penalty: bare copula ('is'/'are'/…) as sole predicate [0.05 weight]
         - Predicate-echo-in-object penalty: object starts with predicate token [0.05 weight]
+        - Semantic noise penalty: fraction of triplets that are circular, bare-verb
+          objects, or meta-commentary [0.05 weight]
         - Ground-truth overlap via SequenceMatcher if provided [0.05 bonus, capped at 1.0]
 
         When a PromptContract is provided its expected_headers drive the header
@@ -534,9 +577,11 @@ class SPOEvaluator:
             taut_ratio   = sum(1 for t in triplet_lines if _is_tautological(t))   / len(triplet_lines)
             trivial_ratio = sum(1 for t in triplet_lines if _is_trivial_predicate(t)) / len(triplet_lines)
             echo_ratio   = sum(1 for t in triplet_lines if _object_echoes_predicate(t)) / len(triplet_lines)
+            noise_ratio  = sum(1 for t in triplet_lines if _triplet_is_semantic_noise_spo(t)) / len(triplet_lines)
             score += 0.05 * (1.0 - taut_ratio)
             score += 0.05 * (1.0 - trivial_ratio)
             score += 0.05 * (1.0 - echo_ratio)
+            score += 0.05 * (1.0 - noise_ratio)
 
         # Ground-truth overlap bonus [0.1 max]
         if ground_truth and ground_truth.strip():

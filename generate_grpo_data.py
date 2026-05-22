@@ -307,7 +307,7 @@ def generate_grpo_data(args: argparse.Namespace) -> None:
                 args.max_new_tokens,
                 args.max_length,
             )
-            rewards = [judge.score_completion(quote, c) for c in completions]
+            rewards = judge.batch_score_completions(quote, completions)
 
             mean_reward = sum(rewards) / len(rewards) if rewards else 0.0
             max_reward = max(rewards) if rewards else 0.0

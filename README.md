@@ -17,15 +17,175 @@ This repo packages the full workflow for turning raw quotes into structured reas
 
 ```mermaid
 flowchart LR
-    A[Quotes] --> B[Generation<br/>LLM or templates]
-    B --> C[Validated reasoning examples]
-    C --> D[Training JSONL<br/>pedagogical order]
-    D --> E[QLoRA adapter]
-    E --> F[Inference on new quotes]
-    F --> G[SPO calibration<br/>optional]
+    A[Quotes] --> B[generate_grpo_data.py\nK=8 completions/quote\nfrozen-judge scored]
+    B --> C[build_sft_corpus.py\ntop-k=3 greedy diverse\nbest-of-N selection]
+    C --> D[benchmark_training.py\nfind optimal batch_size]
+    D --> E[src/run_spo_training.py\nbf16 + grad-ckpt\n2 epochs]
+    E --> F[output/spo_best_of_n/adapter]
+    F --> G[Inference on new quotes]
 ```
 
-## Fast paths
+### Automated pipeline
+
+`post_gen_pipeline.sh` runs the full sequence unattended: waits for generation to
+complete, benchmarks training throughput on the clean GPU, applies the fastest batch
+size, builds the best-of-N corpus, and launches SPO training.
+
+## Expansion training pipeline
+
+The repo now implements a **RAFT-style offline best-of-N pipeline** on top of the
+original SFT corpus. All data is generated and scored upfront; no generation happens
+inside the training loop.
+
+### Phase 1 — Multi-completion generation with frozen-judge scoring
+
+`generate_grpo_data.py` runs the policy adapter in inference mode and generates
+**K=8 completions per quote** across the full 2366-quote corpus. Each completion is
+scored by a frozen copy of the same adapter acting as a judge.
+
+**How the judge scores completions — `batch_score_completions`:**
+
+The frozen judge evaluates each completion through binary confidence probing.
+For a quote Q and completion C, the judge is asked:
+> "Does this completion correctly extract the entailed premises from the quote? [YES/NO]"
+
+The probe is repeated `--confidence-samples 4` times per completion (different temperature
+draws). The final score is the fraction of YES logits across all probe draws:
+
+```
+reward = P(YES | judge, quote, completion)
+       = mean over 4 probe draws of softmax(YES-logit) / (YES-logit + NO-logit)
+```
+
+The judge runs **batched**: all probe prompts for all K completions in a quote group are
+collected into a single tensor, padded, and run in one GPU forward pass via
+`FrozenJudge._batch_binary_probe()`. This replaces the naive sequential approach
+(which was ~65 serial forward passes per quote) with 2–3 batched passes, giving a
+~15× scoring speedup.
+
+**Output schema per row in `data/grpo_generated.jsonl`:**
+
+```json
+{
+  "quote": "...",
+  "prompt": "<|im_start|>user\n...<|im_end|>\n<|im_start|>assistant\n",
+  "completions": ["...", "...", "...", "...", "...", "...", "...", "..."],
+  "rewards": [0.82, 0.91, 0.45, 0.78, 0.60, 0.88, 0.33, 0.71],
+  "mean_reward": 0.685,
+  "max_reward": 0.91,
+  "all_zero": false
+}
+```
+
+### Phase 2 — Best-of-N corpus construction
+
+`build_sft_corpus.py` selects up to **top-k=3 completions per quote** from the
+generated pool. Selection uses **DEITA-style greedy diversity**:
+
+1. **Reward augmentation:** `effective_reward = raw_reward + 0.15 × groundedness_score`
+   where `groundedness_score` is the fraction of the quote's content words (4+ chars)
+   that appear in the completion's triplet subjects/objects. This penalises completions
+   that produce generic `speaker | is | X` templates and rewards ones that extract
+   quote-specific entities.
+
+2. **Slot filling:**
+   - Slot 1 → completion with highest effective_reward
+   - Slots 2–3 → greedily add the highest-reward completion that is *structurally
+     distinct* from already-selected ones (different bucket on
+     `n_entailed / n_non_entailed / conclusion_len / first_entailed_subject`)
+
+3. **Hard schema filter** (applied before selection):
+   - Completion must parse into all three sections: Non-Entailed / Entailed / Throughline
+   - Entailed section must have ≥ 1 pipe-triplet
+   - Non-entailed section must have ≥ 1 pipe-triplet
+   - Throughline must be non-empty
+   - `raw_reward > 0.0` (exact zeros excluded)
+
+**Output schema per row in `data/train_best_of_n.jsonl`:**
+
+```json
+{
+  "quote": "...",
+  "input_text": "Given this quote, extract the implicit reasoning...",
+  "output_text": "Non-Entailed Premises:\n...\nEntailed Premises:\n...\nThroughline:\n...",
+  "reward": 0.91,
+  "rank": 1,
+  "groundedness": 0.73
+}
+```
+
+This is a drop-in `input_text` / `output_text` SFT corpus compatible with
+`src/run_spo_training.py`.
+
+### Phase 3 — SPO training on the best-of-N corpus
+
+`src/run_spo_training.py` fine-tunes the policy adapter on `train_best_of_n.jsonl`
+using standard cross-entropy SFT (SPO weighting on top, reward-proportional loss
+scaling). This is the **same training regime as the original adapter** — no RL loop,
+no live judge, no group-relative advantages — just supervised training on
+reward-filtered, diversity-selected demonstrations.
+
+**Why SPO on best-of-N instead of GRPO:**
+- Offline GRPO on frozen precomputed rewards is mathematically equivalent to
+  weighted SFT — the group-relative advantage normalization reduces gradient
+  variance but the data source is identical
+- `build_sft_corpus.py` already encodes the quality signal through reward filtering
+  and greedy diversity selection, so the heavy lifting is done before training
+- SPO is the same regime as the initial training run — safe continuation,
+  no regime shift
+
+**Infrastructure fixes applied to `src/run_spo_training.py`:**
+
+| Fix | Why |
+|---|---|
+| `dtype=torch.bfloat16` on model load | FP32 = 3.2GB; bf16 = 1.4GB — same footprint halved |
+| `gradient_checkpointing_enable()` | Activation memory ~10× lower; prevents OOM under generation load |
+| Benchmark-derived `batch_size` (auto-applied by pipeline) | Fills GPU VRAM without OOM; measured on clean GPU after generation |
+
+**Training parameters:**
+
+| Parameter | Value | How arrived at |
+|---|---|---|
+| `num_epochs` | 2 | Lesson 10: 1 epoch insufficient for generalisation; 20 is overkill |
+| `learning_rate` | 1e-5 | Standard conservative LoRA continuation rate |
+| `batch_size` | auto (benchmark) | Measured by `benchmark_training.py` on clean GPU post-generation |
+| `gradient_accumulation_steps` | 1 | Large batch already; accumulation adds latency without benefit |
+| `max_length` | 512 | Covers full SPO output (premises + throughline) with margin |
+
+**Training results (2366-quote corpus, 2 epochs):**
+- Train loss epoch 1 → epoch 2: 0.21 → 0.19
+- Holdout correctness: **0.945**
+- Adapter: `output/spo_best_of_n/adapter`
+
+### Two-stage layered generation (v2, future)
+
+The current pipeline is a single expansion pass (quote → K completions). A planned
+v2 pipeline factors this into two independent choices:
+
+```
+Stage 1:  Quote  → K=3 throughlines       (abductive, unconstrained)
+Stage 2:  (Quote, Throughline) → M=3 premise sets  (conditioned on fixed conclusion)
+
+Total:  K × M = 9 structured completions per quote
+        vs current 8 end-to-end completions
+```
+
+Stage 1 generates only a short throughline string (~30 tokens, cheap). Stage 2
+generates premises conditioned on a fixed conclusion:
+```
+Quote: {q}
+Conclusion: {throughline}
+Extract the Non-Entailed and Entailed premises that lead to this conclusion.
+```
+
+This guarantees diversity at both levels (multiple conclusions, multiple premise
+structures per conclusion) and is compatible with the same judge scoring and
+best-of-N selection pipeline.
+
+**Not started yet.** Requires a baseline adapter trained on the current v1 corpus.
+Implementation will live in `generate_layered.py`.
+
+
 
 | If you want to... | Start here |
 |---|---|

@@ -1,0 +1,11 @@
+{
+  "adapter_path": "output/full_run_qwen35_0.8b_3ep/base-plus-facts/adapter",
+  "judge_path": "output/full_run_qwen35_0.8b_3ep/base-plus-facts/adapter",
+  "dataset_path": "data/train_full_corpus.jsonl",
+  "output_path": "data/grpo_generated.jsonl",
+  "group_size": 8,
+  "quotes_processed": 1153,
+  "records_written": 1153,
+  "all_zero_count": 18,
+  "all_zero_fraction": 0.015611448395490026
+}

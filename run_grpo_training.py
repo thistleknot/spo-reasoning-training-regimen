@@ -82,8 +82,7 @@ def _build_parser():
     parser.add_argument(
         "--max-epochs",
         type=int,
-        default=20,
-        help="Hard cap on training epochs regardless of patience.",
+        default=2,
     )
     parser.add_argument(
         "--max-new-tokens",

@@ -59,15 +59,18 @@ def maybe_limit(records: List[dict], limit: int | None) -> List[dict]:
 
 def load_spo_model_and_tokenizer(config: SPOTrainingConfig):
     """Load a trainable PEFT adapter and tokenizer for SPO fine-tuning."""
+    import torch
     model = AutoPeftModelForCausalLM.from_pretrained(
         config.adapter_path,
         is_trainable=True,
         device_map="auto",
+        dtype=torch.bfloat16,
     )
+    model.config.use_cache = False
+    model.gradient_checkpointing_enable()
     tokenizer = AutoTokenizer.from_pretrained(config.adapter_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    model.config.use_cache = False
     return model, tokenizer
 
 

@@ -60,7 +60,7 @@ class GRPOConfig:
     group_size: int = 8                        # G completions per prompt
     patience: int = 3                          # epochs with no improvement before stop
     patience_delta: float = 0.01              # minimum reward improvement to reset patience
-    max_epochs: int = 20
+    max_epochs: int = 2
     max_new_tokens: int = 256
 
     # Quote pruning: drop quotes where the entire group scores 0.0 for this many
@@ -92,8 +92,8 @@ class GRPOConfig:
     holdout_fraction: float = 0.1
     seed: int = 42
     max_length: int = 512
-    batch_size: int = 4                        # quotes per batch (each spawns G completions)
-    gradient_accumulation_steps: int = 4
+    batch_size: int = 16                       # quotes per batch — bf16 + grad-ckpt uses ~11-12GB @ batch=16 on 16GB GPU
+    gradient_accumulation_steps: int = 1       # batch=16 already large enough; accumulation adds latency without benefit
     max_train_records: Optional[int] = None
     logging_steps: int = 10
 
@@ -313,49 +313,59 @@ class GRPOTrainer:
 
         Loss = -mean_over_group( advantage_i * mean_token_log_prob_i )
 
+        All valid completions are stacked into a single batched forward pass
+        under bf16 autocast, replacing K sequential passes with one.  The
+        computation graph is identical; only the number of kernel launches
+        changes (~K× fewer, where K = len(completions)).
+
         Preconditions:
             len(completions) == len(advantages)
-            all completions are non-empty strings
         Guarantee: returns a scalar loss tensor on the model's device.
         """
         device = self.model.device
-        total_loss = torch.tensor(0.0, device=device)
-        valid_count = 0
-
         self.model.train()
+
+        all_ids, all_mask, all_labels, all_adv = [], [], [], []
         for completion, advantage in zip(completions, advantages):
             if not completion.strip():
                 continue
             inputs = self._tokenize_completion(prompt, completion)
-            input_ids = inputs["input_ids"].to(device)
-            attention_mask = inputs["attention_mask"].to(device)
-            labels = inputs["labels"].to(device)
+            all_ids.append(inputs["input_ids"].to(device))
+            all_mask.append(inputs["attention_mask"].to(device))
+            all_labels.append(inputs["labels"].to(device))
+            all_adv.append(advantage)
 
-            outputs = self.model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-            )
-            logits = outputs.logits
-
-            shift_logits = logits[:, :-1, :].contiguous()
-            shift_labels = labels[:, 1:].contiguous()
-            loss_fn = torch.nn.CrossEntropyLoss(ignore_index=-100, reduction="none")
-            token_loss = loss_fn(
-                shift_logits.view(-1, shift_logits.size(-1)),
-                shift_labels.view(-1),
-            ).view(shift_labels.size())
-
-            valid_mask = shift_labels.ne(-100)
-            n_valid = valid_mask.sum().clamp_min(1)
-            seq_log_prob = -(token_loss * valid_mask).sum() / n_valid  # mean log-prob
-
-            # Upweight positive advantages, downweight negative
-            total_loss += -advantage * seq_log_prob
-            valid_count += 1
-
-        if valid_count == 0:
+        if not all_ids:
             return torch.tensor(0.0, device=device, requires_grad=True)
-        return total_loss / valid_count
+
+        ids_b = torch.cat(all_ids, dim=0)       # [K, max_length]
+        mask_b = torch.cat(all_mask, dim=0)
+        labels_b = torch.cat(all_labels, dim=0)
+
+        cuda_available = torch.cuda.is_available()
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=cuda_available):
+            outputs = self.model(input_ids=ids_b, attention_mask=mask_b)
+
+        logits = outputs.logits                  # [K, seq_len, vocab]
+        del outputs  # free output object; logits tensor still referenced for backward
+        shift_logits = logits[:, :-1, :].contiguous()
+        shift_labels = labels_b[:, 1:].contiguous()
+
+        loss_fn = torch.nn.CrossEntropyLoss(ignore_index=-100, reduction="none")
+        token_loss = loss_fn(
+            shift_logits.view(-1, shift_logits.size(-1)),
+            shift_labels.view(-1),
+        ).view(shift_labels.size())              # [K, seq_len-1]
+        del shift_logits, logits  # free [K, seq_len, vocab] before advantage loop
+
+        valid_mask = shift_labels.ne(-100)       # [K, seq_len-1]
+        total_loss = torch.tensor(0.0, device=device)
+        for i, adv in enumerate(all_adv):
+            n_valid = valid_mask[i].sum().clamp_min(1)
+            seq_log_prob = -(token_loss[i] * valid_mask[i]).sum() / n_valid
+            total_loss = total_loss + (-adv * seq_log_prob)
+
+        return total_loss / len(all_adv)
 
     def run_epoch(
         self,
@@ -390,10 +400,16 @@ class GRPOTrainer:
             precomputed_completions = batch.get("completions")
             precomputed_rewards = batch.get("rewards")
 
-            batch_loss = torch.tensor(0.0, device=self.model.device)
+            # Track scalar loss for logging only — never accumulate the graph
+            # across quotes. Each quote's graph is freed immediately after
+            # backward() to keep peak VRAM proportional to K×seq (one quote),
+            # not batch_size×K×seq (entire batch simultaneously).
+            batch_loss_scalar = 0.0
+            active_quotes = len(quotes)
             for i, (quote, prompt) in enumerate(zip(quotes, prompts)):
                 # Skip quotes confirmed unproductive across multiple epochs
                 if quote in self.dead_quotes:
+                    active_quotes -= 1
                     continue
 
                 if precomputed_completions is not None:
@@ -414,6 +430,7 @@ class GRPOTrainer:
                             f"  [prune] Dead quote after {streak} all-zero epochs "
                             f"(total dead: {len(self.dead_quotes)}): {quote[:60]!r}"
                         )
+                    active_quotes -= 1
                     continue  # no gradient signal; skip loss step
 
                 # Non-zero group: reset streak and proceed with update
@@ -428,10 +445,16 @@ class GRPOTrainer:
                 )
 
                 loss = self.compute_grpo_loss(prompt, completions, advantages)
-                batch_loss = batch_loss + loss
+                n_quotes = max(active_quotes, 1)
+                # backward per-quote: frees the computation graph immediately,
+                # keeping peak VRAM at O(K × seq × vocab) not O(batch × K × seq × vocab)
+                (loss / n_quotes / self.config.gradient_accumulation_steps).backward()
+                batch_loss_scalar += loss.item()
+                del loss
 
+            # Reconstruct a scalar tensor for logging compatibility downstream
+            batch_loss = torch.tensor(batch_loss_scalar, device=self.model.device)
             step += 1
-            (batch_loss / len(quotes) / self.config.gradient_accumulation_steps).backward()
 
             if (
                 batch_idx % self.config.gradient_accumulation_steps == 0
@@ -519,7 +542,9 @@ def run_grpo_training(config: GRPOConfig) -> dict:
             config.adapter_path,
             is_trainable=True,
             device_map="auto",
+            torch_dtype=torch.bfloat16,
         )
+        policy_model.gradient_checkpointing_enable()
         tokenizer = AutoTokenizer.from_pretrained(config.adapter_path)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
@@ -611,7 +636,9 @@ def run_grpo_training(config: GRPOConfig) -> dict:
             config.adapter_path,
             is_trainable=True,
             device_map="auto",
+            torch_dtype=torch.bfloat16,
         )
+        policy_model.gradient_checkpointing_enable()
         tokenizer = AutoTokenizer.from_pretrained(config.adapter_path)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token

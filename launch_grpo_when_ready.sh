@@ -84,7 +84,7 @@ $VENV run_grpo_training.py \
     --output-dir "$OUTPUT_DIR" \
     --group-size 8 \
     --patience 3 \
-    --max-epochs 20
+    --max-epochs 2
 
 echo "[$(date)] GRPO pipeline complete. Adapter → $OUTPUT_DIR"
 echo "[$(date)] SFT corpus ready for independent SFT training → $SFT_CORPUS"

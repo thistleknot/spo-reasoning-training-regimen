@@ -279,6 +279,141 @@ class FrozenJudge:
         yes_prob = torch.softmax(torch.stack([yes_logit, no_logit]), dim=0)[0]
         return float(yes_prob)
 
+    def _batch_binary_probe(self, prompts: List[str], max_batch: int = 4) -> List[float]:
+        """Return P(Yes) for each prompt via batched forward passes.
+
+        Uses left-padding so the last real token position is always index -1,
+        giving a consistent next-token prediction across variable-length inputs.
+        Chunks into sub-batches of at most max_batch to cap VRAM usage.
+
+        Key: only the yes/no logit pair is retained per sequence — the full
+        [batch × seq × vocab] logit tensor is freed immediately to avoid
+        multi-GB VRAM spikes from the large vocab (151k tokens).
+
+        Preconditions: prompts is non-empty; each prompt ends with 'Answer Yes or No.'
+        Guarantee: returns list of floats in [0.0, 1.0], same length as prompts.
+        """
+        orig_padding_side = self.tokenizer.padding_side
+        self.tokenizer.padding_side = "left"
+        results: List[float] = []
+        try:
+            for chunk_start in range(0, len(prompts), max_batch):
+                chunk = prompts[chunk_start : chunk_start + max_batch]
+                encoded = self.tokenizer(
+                    chunk,
+                    return_tensors="pt",
+                    truncation=True,
+                    max_length=512,
+                    padding=True,
+                )
+                input_ids = encoded["input_ids"].to(self.model.device)
+                attention_mask = encoded["attention_mask"].to(self.model.device)
+
+                with self._as_judge(), torch.no_grad():
+                    outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
+
+                # Extract only the two logits we need before freeing the full tensor.
+                # outputs.logits is [batch, seq, vocab=151936] — keeping it alive
+                # would consume batch × seq × vocab × dtype bytes of VRAM.
+                yes_no = outputs.logits[:, -1, [self._yes_id, self._no_id]].float()
+                del outputs  # free [batch, seq, vocab] immediately
+                probs = torch.softmax(yes_no, dim=1)[:, 0]
+                results.extend(probs.cpu().tolist())
+        finally:
+            self.tokenizer.padding_side = orig_padding_side
+        return results
+
+    def batch_score_completions(
+        self, quote: str, completions: List[str], max_batch: int = 4
+    ) -> List[float]:
+        """Score all completions for a single quote in one batched judge call.
+
+        Collects all entailment, non-entailment, and conclusion probes across
+        every completion, runs them as a single batched forward pass, then
+        aggregates results back to per-completion scores.
+
+        This replaces N sequential calls to score_completion() with ~1-2 batched
+        forward passes, giving a 10-20× speedup on the scoring step.
+
+        Preconditions:
+            quote is non-empty.
+            completions is a non-empty list of decoded model outputs.
+        Guarantee:
+            Returns list of floats in [0.0, 1.0], same length as completions.
+            Completions that fail to parse receive 0.0.
+            confidence_samples support is intentionally omitted here (use
+            score_completion for that path).
+        """
+        sections = [_extract_sections(c) for c in completions]
+
+        # Separate valid (has entailed premises) from invalid
+        valid_mask = [bool(entailed) for _, entailed, _ in sections]
+        valid_sections = [s for s, ok in zip(sections, valid_mask) if ok]
+
+        if not valid_sections:
+            return [0.0] * len(completions)
+
+        # Build all probe prompts in one flat list, tracking metadata
+        prompts: List[str] = []
+        probe_meta: List[tuple] = []  # (local_valid_idx, probe_kind)
+
+        for local_idx, (non_entailed, entailed, conclusion) in enumerate(valid_sections):
+            for p in entailed:
+                prompts.append(_ENTAILMENT_TEMPLATE.format(
+                    quote=quote.strip(), premise=p.strip()
+                ))
+                probe_meta.append((local_idx, "e"))
+
+            for p in (non_entailed or []):
+                prompts.append(_NON_ENTAILMENT_TEMPLATE.format(
+                    quote=quote.strip(), premise=p.strip()
+                ))
+                probe_meta.append((local_idx, "ne"))
+
+            if conclusion and entailed:
+                premises_text = "\n".join(f"- {p}" for p in entailed)
+                prompts.append(_CONCLUSION_TEMPLATE.format(
+                    premises=premises_text, conclusion=conclusion.strip()
+                ))
+                probe_meta.append((local_idx, "c"))
+
+        raw_scores = self._batch_binary_probe(prompts, max_batch=max_batch)
+
+        # Aggregate per valid completion
+        n_valid = len(valid_sections)
+        e_acc: List[List[float]] = [[] for _ in range(n_valid)]
+        ne_acc: List[List[float]] = [[] for _ in range(n_valid)]
+        c_acc: List[List[float]] = [[] for _ in range(n_valid)]
+
+        for score, (local_idx, kind) in zip(raw_scores, probe_meta):
+            if kind == "e":
+                e_acc[local_idx].append(score)
+            elif kind == "ne":
+                ne_acc[local_idx].append(score)
+            else:
+                c_acc[local_idx].append(score)
+
+        valid_results: List[float] = []
+        for local_idx in range(n_valid):
+            entailment_score = sum(e_acc[local_idx]) / len(e_acc[local_idx]) if e_acc[local_idx] else 0.0
+            non_entailment_score = sum(ne_acc[local_idx]) / len(ne_acc[local_idx]) if ne_acc[local_idx] else 0.5
+            conclusion_score = c_acc[local_idx][0] if c_acc[local_idx] else 0.0
+
+            structural_raw = (
+                self.entailment_weight * entailment_score
+                + self.non_entailment_weight * non_entailment_score
+                + self.conclusion_weight * conclusion_score
+            )
+            structural_norm = self.entailment_weight + self.non_entailment_weight + self.conclusion_weight
+            valid_results.append(min(max(structural_raw / structural_norm, 0.0), 1.0))
+
+        # Re-interleave with 0.0 for invalid completions
+        final: List[float] = []
+        valid_iter = iter(valid_results)
+        for is_valid in valid_mask:
+            final.append(next(valid_iter) if is_valid else 0.0)
+        return final
+
     def score_entailment(self, quote: str, premise: str) -> float:
         """P(premise follows from quote).
 

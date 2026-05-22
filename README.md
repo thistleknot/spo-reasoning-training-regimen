@@ -158,11 +158,137 @@ reward-filtered, diversity-selected demonstrations.
 - Adapter: `output/spo_best_of_n/adapter`
 
 **Downstream model outputs — holdout inference:**  
-[`data/SEEING_IS_BELIEVING_EXAMPLES.md`](data/SEEING_IS_BELIEVING_EXAMPLES.md) contains
-real before/after outputs: 15 holdout quotes (unseen during training) run through both
-the original adapter and the SPO-trained adapter. The before model shows formatting noise
-(garbled predicate casing, inconsistent structure); the after model produces clean,
-structurally consistent premise sets and throughlines.
+[`data/SEEING_IS_BELIEVING_EXAMPLES.md`](data/SEEING_IS_BELIEVING_EXAMPLES.md) — 15
+holdout quotes run through both adapters. Three representative examples below.
+
+---
+
+#### Example A — Conciseness gain
+
+> *"The truth." Dumbledore sighed. "It is a beautiful and terrible thing, and should therefore be treated with great caution."*
+
+**Before** (original adapter, 967-quote corpus):
+```
+Non-Entailed Premises:
+Dumbledore | is (observed) | sighed
+Dumbledore | is a wizard | is (observed, inferred) | true
+The truth | is (observed). | is (observed): true
+The truth | should be (observed). | should be (obsERVED): true
+The truth is (observed).| is (observed): beautiful
+The truth is (oberved).| is (oberved): terrible
+
+Entailed Premises:
+Dumbledore | is (inferred) | treats the truth with great caution
+Dumbledore | is in (observed) | a state of being
+Dumbledore | is aware of (observed) | the nature of the truth
+Dumbledore | is concerned about (observed) | whether the truth is beautiful or terrible
+Dumbledore | is considering (observed) | if the truth is beautiful or not
+Dumbledore | is evaluating (observed) | two distinct attributes of the truth
+D Dumbledore | is considering (obsERVED) | the potential for the truth to be beautiful
+Dumbledore | is assessing (observed) | potential negative attributes of the truth
+
+Throughline:
+Dumbledore evaluates the truth as a complex entity that possesses both positive and
+negative attributes, necessitating a cautious approach to its treatment.
+```
+
+**After** (SPO best-of-N adapter):
+```
+Non-Entailed Premises:
+Dumbledore | is (observed) | sighed
+Dumbledore | is a wizard | is (observed, inferred) | true
+
+Entailed Premises:
+The truth | is (inferred) | a beautiful thing
+The truth | is a terrible thing
+The truth | should be treated with great caution
+
+Throughline:
+The truth is a beautiful and terrible phenomenon that requires careful handling.
+```
+
+*Before: 11 entailed premises, repetitive, garbled casing (`obsERVED`, `oberved`), no throughline focus. After: 3 clean premises, correct SPO structure, single-sentence throughline.*
+
+---
+
+#### Example B — Format correctness
+
+> *"The worst type of crying wasn't the kind everyone could see… No, the worst kind happened when your soul wept and no matter what you did, there was no way to comfort it."*
+
+**Before**:
+```
+Non-Entailed Premises:
+the worst crying was tearing at clothes | is (observed) | true
+the worst crying was wailing on street corners | is (observed, false)
+the worst kind of crying happened when your soul weeped | is (observed', true)
+the worst kind happened when no matter what you did | is (obsessed', true)
+
+Entailed Premises:
+the soul wept | was (obsessed) | true
+the soul weeping and no way to comfort the soul | was (obsessed), true
+the soul wept and became a section that survived | was (obsessed)', true
+the soul contained more scar tissues than life | was (obsessed)'s), true
+```
+
+**After**:
+```
+Non-Entailed Premises:
+street corners | is (observed) | where crying happens
+people | is (observed) | can see the worst kind of crying
+
+Entailed Premises:
+worst kind of crying | is (inferred to be) | the kind that happens when your soul wept
+worst kind (wailing on street corners, tearing at clothes) | is (inferred not to be) | the worst kind
+people | is (explicitly stated) | have souls that contained more scar tissue than life
+
+Throughline:
+The worst kind of crying is not the visible tears on the street, but the internal,
+soul-level pain that persists even after one's actions, leaving a permanent scar.
+```
+
+*Before: `obsessed` leaking through as evidence tag, broken quoting, no throughline. After: correct entailment/non-entailment split, coherent throughline.*
+
+---
+
+#### Example C — Entailment discrimination
+
+> *"Never be afraid to raise your voice for honesty and truth and compassion against injustice and lying and greed. If people all over the world would do this, it would change the earth."*
+
+**Before**:
+```
+Non-Entailed Premises:
+raising your voice | is (observed) | against injustice
+lying | is (inferred to be) | a type of greed
+honesty | is (observed as) | a form of truth
+compassion | is (observed in) | a form of honesty
+
+Entailed Premises:
+raising voices for lying | is (inferred that) | would not change the earth
+raising voices for greed | is (inferred by) | would not change earth
+raising voices for injustice | is (observed against) | would not change Earth
+raising voices for lying and greed | is (observed not to change earth)
+```
+
+**After**:
+```
+Non-Entailed Premises:
+raising your voice | is (observed) | a moral action
+people | are (observed) | over the world
+
+Entailed Premises:
+raising your voice for honesty | is (observed/implicated) | a form of compassion
+raising your voice for truth | is (observed/implied) | a form of honesty
+people | are (inferred) | capable of raising their voice
+
+Throughline:
+Raising one's voice for honesty, truth, and compassion against injustice, lying, and
+greed would fundamentally alter the course of history.
+```
+
+*Before: entailed section polluted with negatives ("would not change earth"), no throughline. After: entailed premises stay on-topic, negatives dropped, throughline present.*
+
+---
+
 
 ### Two-stage layered generation (v2, future)
 

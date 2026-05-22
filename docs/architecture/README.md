@@ -345,3 +345,20 @@ if match:
 - Inference guide: `docs/inference/README.md`
 - Generation guide: `docs/generation/README.md`
 - Code: `src/*.py`
+
+
+---
+
+## The three phases in one paragraph each
+
+### Phase 1: Generate
+
+Turn raw quotes into structured reasoning examples. This can be done with a hosted LLM, a local model, or plain templates if you want to hand-fill the outputs.
+
+### Phase 2: Train
+
+Take the validated JSONL and fine-tune a base model so it learns the pedagogical reasoning format: non-entailed premises first, then entailed premises, then the throughline.
+
+### Phase 3: Optimize
+
+Evaluate the base model on held-out quotes to verify that it emits the correct premises and throughline. Quality scoring via a downstream judge is optional.

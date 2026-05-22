@@ -884,3 +884,289 @@ string itself, not the combined `question + SEP + context` string.
 
 **Canonical implementation:** `src/generate_structured_corpus.py::_extract_span` on the
 `verbatim-with-transliteration` branch (final commit).
+
+
+---
+
+## Expansion training pipeline
+
+The repo now implements a **RAFT-style offline best-of-N pipeline** on top of the
+original SFT corpus. All data is generated and scored upfront; no generation happens
+inside the training loop.
+
+### Phase 1 — Multi-completion generation with frozen-judge scoring
+
+`generate_grpo_data.py` runs the policy adapter in inference mode and generates
+**K=8 completions per quote** across the full 2366-quote corpus. Each completion is
+scored by a frozen copy of the same adapter acting as a judge.
+
+**How the judge scores completions — `batch_score_completions`:**
+
+The frozen judge evaluates each completion through binary confidence probing.
+For a quote Q and completion C, the judge is asked:
+> "Does this completion correctly extract the entailed premises from the quote? [YES/NO]"
+
+The probe is repeated `--confidence-samples 4` times per completion (different temperature
+draws). The final score is the fraction of YES logits across all probe draws:
+
+```
+reward = P(YES | judge, quote, completion)
+       = mean over 4 probe draws of softmax(YES-logit) / (YES-logit + NO-logit)
+```
+
+The judge runs **batched**: all probe prompts for all K completions in a quote group are
+collected into a single tensor, padded, and run in one GPU forward pass via
+`FrozenJudge._batch_binary_probe()`. This replaces the naive sequential approach
+(which was ~65 serial forward passes per quote) with 2–3 batched passes, giving a
+~15× scoring speedup.
+
+**Output schema per row in `data/grpo_generated.jsonl`:**
+
+```json
+{
+  "quote": "...",
+  "prompt": "<|im_start|>user\n...<|im_end|>\n<|im_start|>assistant\n",
+  "completions": ["...", "...", "...", "...", "...", "...", "...", "..."],
+  "rewards": [0.82, 0.91, 0.45, 0.78, 0.60, 0.88, 0.33, 0.71],
+  "mean_reward": 0.685,
+  "max_reward": 0.91,
+  "all_zero": false
+}
+```
+
+### Phase 2 — Best-of-N corpus construction
+
+`build_sft_corpus.py` selects up to **top-k=3 completions per quote** from the
+generated pool. Selection uses **DEITA-style greedy diversity**:
+
+1. **Reward augmentation:** `effective_reward = raw_reward + 0.15 × groundedness_score`
+   where `groundedness_score` is the fraction of the quote's content words (4+ chars)
+   that appear in the completion's triplet subjects/objects. This penalises completions
+   that produce generic `speaker | is | X` templates and rewards ones that extract
+   quote-specific entities.
+
+2. **Slot filling:**
+   - Slot 1 → completion with highest effective_reward
+   - Slots 2–3 → greedily add the highest-reward completion that is *structurally
+     distinct* from already-selected ones (different bucket on
+     `n_entailed / n_non_entailed / conclusion_len / first_entailed_subject`)
+
+3. **Hard schema filter** (applied before selection):
+   - Completion must parse into all three sections: Non-Entailed / Entailed / Throughline
+   - Entailed section must have ≥ 1 pipe-triplet
+   - Non-entailed section must have ≥ 1 pipe-triplet
+   - Throughline must be non-empty
+   - `raw_reward > 0.0` (exact zeros excluded)
+
+**Output schema per row in `data/train_best_of_n.jsonl`:**
+
+```json
+{
+  "quote": "...",
+  "input_text": "Given this quote, extract the implicit reasoning...",
+  "output_text": "Non-Entailed Premises:\n...\nEntailed Premises:\n...\nThroughline:\n...",
+  "reward": 0.91,
+  "rank": 1,
+  "groundedness": 0.73
+}
+```
+
+This is a drop-in `input_text` / `output_text` SFT corpus compatible with
+`src/run_spo_training.py`.
+
+### Phase 3 — SPO training on the best-of-N corpus
+
+`src/run_spo_training.py` fine-tunes the policy adapter on `train_best_of_n.jsonl`
+using standard cross-entropy SFT (SPO weighting on top, reward-proportional loss
+scaling). This is the **same training regime as the original adapter** — no RL loop,
+no live judge, no group-relative advantages — just supervised training on
+reward-filtered, diversity-selected demonstrations.
+
+**Why SPO on best-of-N instead of GRPO:**
+- Offline GRPO on frozen precomputed rewards is mathematically equivalent to
+  weighted SFT — the group-relative advantage normalization reduces gradient
+  variance but the data source is identical
+- `build_sft_corpus.py` already encodes the quality signal through reward filtering
+  and greedy diversity selection, so the heavy lifting is done before training
+- SPO is the same regime as the initial training run — safe continuation,
+  no regime shift
+
+**Infrastructure fixes applied to `src/run_spo_training.py`:**
+
+| Fix | Why |
+|---|---|
+| `dtype=torch.bfloat16` on model load | FP32 = 3.2GB; bf16 = 1.4GB — same footprint halved |
+| `gradient_checkpointing_enable()` | Activation memory ~10× lower; prevents OOM under generation load |
+| Benchmark-derived `batch_size` (auto-applied by pipeline) | Fills GPU VRAM without OOM; measured on clean GPU after generation |
+
+**Training parameters:**
+
+| Parameter | Value | How arrived at |
+|---|---|---|
+| `num_epochs` | 2 | Lesson 10: 1 epoch insufficient for generalisation; 20 is overkill |
+| `learning_rate` | 1e-5 | Standard conservative LoRA continuation rate |
+| `batch_size` | auto (benchmark) | Measured by `benchmark_training.py` on clean GPU post-generation |
+| `gradient_accumulation_steps` | 1 | Large batch already; accumulation adds latency without benefit |
+| `max_length` | 512 | Covers full SPO output (premises + throughline) with margin |
+
+**Training results (2366-quote corpus, 2 epochs):**
+- Train loss epoch 1 → epoch 2: 0.21 → 0.19
+- Holdout correctness: **0.945**
+- Adapter: `output/spo_best_of_n/adapter`
+
+**Downstream model outputs:** see [Before / After: Holdout Model Outputs](#before--after-holdout-model-outputs) below.
+
+
+### Two-stage layered generation (v2, future)
+
+The current pipeline is a single expansion pass (quote → K completions). A planned
+v2 pipeline factors this into two independent choices:
+
+```
+Stage 1:  Quote  → K=3 throughlines       (abductive, unconstrained)
+Stage 2:  (Quote, Throughline) → M=3 premise sets  (conditioned on fixed conclusion)
+
+Total:  K × M = 9 structured completions per quote
+        vs current 8 end-to-end completions
+```
+
+Stage 1 generates only a short throughline string (~30 tokens, cheap). Stage 2
+generates premises conditioned on a fixed conclusion:
+```
+Quote: {q}
+Conclusion: {throughline}
+Extract the Non-Entailed and Entailed premises that lead to this conclusion.
+```
+
+This guarantees diversity at both levels (multiple conclusions, multiple premise
+structures per conclusion) and is compatible with the same judge scoring and
+best-of-N selection pipeline.
+
+**Not started yet.** Requires a baseline adapter trained on the current v1 corpus.
+Implementation will live in `generate_layered.py`.
+
+
+
+| If you want to... | Start here |
+|---|---|
+| Understand the whole workflow fast | `docs/quickstart/README.md` |
+| Configure an LLM for dataset generation | `docs/generation/README.md` |
+| Train with QLoRA | `docs/training/README.md` |
+| Configure model inference | `docs/inference/README.md` |
+| Understand the exact format contract | `docs/format/README.md` |
+| See finished examples before touching code | `data/SEEING_IS_BELIEVING_EXAMPLES.md` |
+
+
+---
+
+## Training regimen families
+
+The repo now supports three adjacent supervised tasks over the same synthetic source data:
+
+| Regimen | Input | Output |
+|---|---|---|
+| Base reasoning | Prompted quote instruction | Non-entailed + entailed premises + throughline |
+
+This regimen teaches the reasoning structure cleanly. Evidence tags (`observed`/`inferred`) are preserved; numeric confidence scores are not used.
+
+The staged curriculum for mixing those regimens now lives in `src/training_strategy.py`. It encodes:
+
+1. base warm start
+2. multi-task mixture with the base task dominant
+3. optional later score refinement once better judge labels exist
+
+You can materialize the default strategy JSON with:
+
+```bash
+python -m src.training_strategy --output training_strategy.json
+```
+
+The downstream evaluation harness now lives in `src/evaluate_regimens.py`. It scores whether confidence is useful rather than whether it merely matches synthetic numbers:
+
+```bash
+python -m src.evaluate_regimens \
+  --input eval/scored_holdout.jsonl \
+  --acceptance-threshold 0.7
+```
+
+That JSONL should contain at least:
+
+```json
+{"quote":"...", "syllogism_quality":0.91}
+```
+
+where `syllogism_quality` is your downstream judge or rubric score on a normalized 0-1 scale.
+
+If you need to rebuild the canonical corpora from recoverable upstream artifacts, use:
+
+```bash
+python -m src.rebuild_training_corpora \
+  --confidence-source /tmp/gen-qwen3-qlora/output/train_preprocessed_structured_967.jsonl \
+  --conclusion-source /tmp/triplet-abductive-native-full-20250501/output/train.section-format.backup.jsonl
+```
+
+If you want to run the ablation matrix directly, use:
+
+```bash
+python -m src.run_ablation_matrix \
+  --output-dir output/ablations_run \
+  --holdout-fraction 0.1 \
+  --max-holdout-records 32 \
+  --experiment base-only
+```
+
+That run now emits:
+
+- per-experiment `results.json`
+- `ablation_summary.json`
+- `holdout_examples.md` with side-by-side sampled holdout outputs for each ablation
+- live per-experiment and per-stage progress lines during training/eval
+
+**SPO reward design notes:**
+
+- Rewards are pre-computed from the training data itself — no generation inside the training loop.
+  Each sample gets a quality weight based on: unique-premises ratio, mean predicate specificity,
+  and subject diversity (outputs where every line starts with `the speaker` are down-weighted).
+- `evaluate_triplet_correctness` hard-zeros any output where more than half the triplet lines are
+  duplicates, and deducts for self-referential triplets (e.g. `subject | is | is subject`).
+  This prevents the SPO loop from reinforcing repetitive looping behaviour.
+- Generation uses `repetition_penalty=1.3` and `no_repeat_ngram_size=4` throughout. Without these,
+  greedy decoding on an under-trained model produces exact-line repetition indefinitely.
+
+
+---
+
+## How the data gets cleaned before training
+
+The repo's filtering/cleaning path is conservative and explicit rather than magic:
+
+1. **Parse the hybrid record** via `src/preprocess_training_data.py`
+   - Pull the quote out of `input_text`
+   - Extract `Entailed Premises`, `Non-Entailed Premises`, and `Conclusion` / `Syllogism`
+2. **Normalize section values**
+   - Empty or explicit `N/A` sections become `None` in the structured record
+   - Missing markdown wrappers are handled by the section extractor when possible
+3. **Preserve reasoning signal**
+    - Triplets stay intact
+    - Evidence tags are preserved
+    - Numeric confidence scores are dropped entirely — both from structured records and training rows
+    - The cleaned corpus in `data/train_clean_for_model_967.jsonl` reflects the confidence-free training target
+4. **Drop malformed rows at preprocessing time**
+   - If a line fails JSON parsing or record conversion, it increments the preprocessing error count and is not written to the cleaned output
+5. **Serialize survivors into training format**
+   - `src/serialize_training_format.py` writes the final pedagogical order:
+     `Non-Entailed Premises -> Entailed Premises -> Throughline`
+   - Empty sections are written back out as explicit `N/A`
+
+In other words, the repo is not training directly on whatever the generator spit out. It parses, normalizes, preserves the reasoning structure, and only then serializes clean training rows without static numeric confidence labels.
+
+
+---
+
+## Hardware by phase
+
+| Phase | GPU | VRAM | Notes |
+|---|---|---|---|
+| Generation | Optional | Depends on model | Hosted APIs or local models both work |
+| Training | Recommended | 8GB+ | QLoRA keeps smaller models practical |
+| SPO | Optional | 8GB+ | Useful for reward-weighted quality refinement |

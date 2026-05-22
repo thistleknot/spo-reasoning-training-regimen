@@ -435,3 +435,16 @@ EOF
 - Architecture: docs/architecture/README.md
 - Code: src/*.py
 - Examples: data/SEEING_IS_BELIEVING_EXAMPLES.md
+
+
+---
+
+## Practical next steps
+
+1. Read `data/SEEING_IS_BELIEVING_EXAMPLES.md` if you want output intuition first
+2. Use `docs/generation/README.md` if you need help wiring up OpenAI, Ollama, or Hugging Face
+3. Use `docs/format/README.md` if you need the exact prompt and serialization contract
+4. Use `docs/training/README.md` when you are ready to fine-tune
+5. Use `docs/inference/README.md` when you are ready to load adapters and run new quotes
+
+---

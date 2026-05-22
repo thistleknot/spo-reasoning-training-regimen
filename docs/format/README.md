@@ -537,3 +537,93 @@ Model learns this is good prediction (high correctness, reasonable confidence)
 - Format configuration: `src/training_config.py`
 - Examples: `data/SEEING_IS_BELIEVING_EXAMPLES.md`
 - Architecture guide: `docs/architecture/README.md`
+
+
+---
+
+## Synthetic generation -> training example
+
+The same quote moves through a few different shapes before it becomes a training row.
+
+### 1. Synthetic generation scaffold
+
+```text
+Input:
+"By the pricking of my thumbs, Something wicked this way comes."
+
+Completion:
+Throughline:
+  When one feels a premonition or intuitive sense, something bad is approaching.
+
+Entailed Premises:
+  - something | is (inferred) | wicked
+  - something | is (inferred) | coming
+
+Non-Entailed Premises:
+  - thumbs | are (observed) | pricking
+```
+
+### 2. Preprocessed structured record
+
+The preprocessing step strips hybrid markdown wrappers, extracts named sections, normalizes missing values, and turns the scaffold into a clean structured record:
+
+```json
+{
+  "quote": "By the pricking of my thumbs, Something wicked this way comes.",
+  "entailed_premises": [
+    "something | is (inferred) | wicked",
+    "something | is (inferred) | coming"
+  ],
+  "non_entailed_premises": [
+    "thumbs | are (observed) | pricking"
+  ],
+  "syllogism": "When one feels a premonition or intuitive sense, something bad is approaching."
+}
+```
+
+### 3. Training row actually fed to the model
+
+The serializer then converts that structured record into the pedagogical training format used for QLoRA. The base regimen now uses an explicit task prompt plus chat-formatted supervision so the instruct model sees the same contract at train and inference time. Evidence tags stay; numeric confidence is stripped so the base model learns premises and throughline text rather than frozen scores:
+
+```text
+Given this quote, extract the implicit reasoning.
+
+Quote: "By the pricking of my thumbs, Something wicked this way comes."
+
+Generate a response with:
+1. Non-Entailed Premises
+2. Entailed Premises
+3. Throughline
+
+Format each premise as: subject | relation (tag) | object
+- tag: "observed" for explicit facts, "inferred" for derived facts
+
+Response:
+
+Non-Entailed Premises:
+thumbs | are (observed) | pricking
+
+Entailed Premises:
+something | is (inferred) | wicked
+something | is (inferred) | coming
+
+Throughline:
+When one feels a premonition or intuitive sense, something bad is approaching.
+```
+
+
+---
+
+## Why the format matters
+
+The core design choice is that the repo uses different orders for different stages of the pipeline.
+
+| Stage | Order | Why |
+|---|---|---|
+| Generation | Throughline -> Entailed -> Non-Entailed | Natural reasoning flow for the generating LLM |
+| Training | Non-Entailed -> Entailed -> Throughline | Negative inference first; better contrastive signal |
+| Inference | Non-Entailed -> Entailed -> Throughline | The model tends to emit what it was taught |
+
+This matters because the training target is not just "state the answer." It teaches the model what does **not** support the conclusion before teaching what does. That is the job of **non-entailed premises**.
+
+For the full specification, examples, and exact `Input` / `Completion` layout, read `docs/format/README.md`.
